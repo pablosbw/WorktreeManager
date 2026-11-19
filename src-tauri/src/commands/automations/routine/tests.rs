@@ -1052,6 +1052,7 @@ fn commands_fail_for_repositories_without_a_worktree_in_the_task() {
         capacity: Capacity::Hold,
         uses: Vec::new(),
         task: Default::default(),
+        defines_item: false,
         kind: StepKind::Wait(WaitStep::Signal("go".into())),
     };
     let request = StepRequest {
@@ -1309,7 +1310,8 @@ fn the_inbox_hears_of_newly_settled_requests_and_of_the_run_end() {
 struct LoggingBridge;
 
 /// Appends task logs, and upserts tracker issues whose branch follows their marker, labels and
-/// milestone unless the title asks for a failure. An issue's id is its branch's.
+/// milestone unless the title asks for a failure. An issue's id is its branch's. An issue moved to
+/// another state is identified by the marker that found it.
 impl OperationsBridge for LoggingBridge {
     fn call(&self, method: &str, params: Value) -> Value {
         if method == "linear.issue-upsert" {
@@ -1331,6 +1333,9 @@ impl OperationsBridge for LoggingBridge {
                     "branchName": format!("me/{branch}"),
                 } }),
             };
+        }
+        if method == "linear.issue-state" {
+            return json!({ "ok": true, "data": { "identifier": params["marker"], "changed": true } });
         }
         assert_eq!(method, "task.log-append");
         json!({ "ok": true, "data": { "status": "appended", "path": params["id"] } })
@@ -1483,6 +1488,7 @@ steps:
 mod calls;
 mod campaign;
 mod decisions;
+mod defined_item;
 mod missing_task;
 mod operator;
 mod outputs;

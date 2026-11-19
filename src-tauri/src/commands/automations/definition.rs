@@ -4,6 +4,7 @@
 
 mod call;
 mod circleci_trigger;
+mod defined_item;
 pub mod edit;
 mod fields;
 mod github_trigger;
@@ -339,6 +340,8 @@ pub struct Step {
     pub uses: Vec<String>,
     pub task: StepTask,
     pub kind: StepKind,
+    /// A routine's step whose result defines the item the later steps work on.
+    pub defines_item: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

@@ -29,6 +29,7 @@ fn step(id: &str, kind: StepKind) -> Step {
         capacity,
         uses: Vec::new(),
         task: Default::default(),
+        defines_item: false,
         kind,
     }
 }
