@@ -130,6 +130,12 @@ function PipelineRuns({ name, steps, repos, onEdit }: PipelineRunsProps) {
             ))}
           </select>
         )}
+        {item?.defined && (
+          <span className="select-text" title={`Version ${item.defined.version}`}>
+            Item {item.defined.id}
+            {item.defined.title ? ` · ${item.defined.title}` : ""}
+          </span>
+        )}
         {live && <span className="text-success">Live</span>}
         <Button variant="secondary" className="ml-auto h-7 px-3 text-xs" onClick={onEdit}>
           Edit steps
