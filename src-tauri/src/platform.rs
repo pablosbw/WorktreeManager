@@ -474,6 +474,129 @@ pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
     }
 }
 
+/// Links `link` to `target` so both name one file: a symbolic link, or on Windows without the
+/// right to create one (no Developer Mode), a hard link. Compare with [`same_file`].
+pub fn shared_link(target: &Path, link: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        symlink(target, link).or_else(|_| fs::hard_link(target, link))
+    }
+}
+
+/// Whether both paths, following links, name the same file. False when either cannot be read.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(a), fs::metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(windows)]
+    {
+        file_id(a).is_some_and(|id| file_id(b) == Some(id))
+    }
+}
+
+/// [`fs::canonicalize`] for paths handed to other programs: on Windows it drops the `\\?\`
+/// prefix the canonical path carries, which editors read as a relative path.
+pub fn canonicalize(path: &Path) -> io::Result<PathBuf> {
+    let path = fs::canonicalize(path)?;
+    let plain = path.to_str().and_then(without_verbatim_prefix);
+    Ok(plain.map_or(path, PathBuf::from))
+}
+
+/// `\\?\C:\dir` as `C:\dir` and `\\?\UNC\server\share` as `\\server\share`; None otherwise.
+fn without_verbatim_prefix(path: &str) -> Option<String> {
+    if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{share}"));
+    }
+    let rest = path.strip_prefix(r"\\?\")?;
+    let drive = rest.as_bytes();
+    let is_drive = drive.len() >= 3 && drive[0].is_ascii_alphabetic() && &drive[1..3] == b":\\";
+    is_drive.then(|| rest.to_owned())
+}
+
+/// The volume and file index that identify a file on Windows, shared by its hard links.
+#[cfg(windows)]
+fn file_id(path: &Path) -> Option<(u32, u32, u32)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const FILE_SHARE_ALL: u32 = 0x7;
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_ALL)
+        .open(path)
+        .ok()?;
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } != 0;
+    ok.then_some((
+        info.dwVolumeSerialNumber,
+        info.nFileIndexHigh,
+        info.nFileIndexLow,
+    ))
+}
+
+/// Every running process as `(pid, parent pid)`, from a process snapshot. Windows only: Unix
+/// callers read `ps`.
+#[cfg(windows)]
+pub fn parent_pids() -> Option<Vec<(u32, u32)>> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut pairs = Vec::new();
+        let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+        while more {
+            pairs.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            more = Process32NextW(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+        Some(pairs)
+    }
+}
+
+/// The executable the process `pid` runs. Windows only.
+#[cfg(windows)]
+pub fn process_image(pid: u32) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut buffer = vec![0u16; 32_768];
+        let mut size = buffer.len() as u32;
+        let ok =
+            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut size)
+                != 0;
+        CloseHandle(handle);
+        ok.then(|| PathBuf::from(OsString::from_wide(&buffer[..size as usize])))
+    }
+}
+
 /// The bytes of `value` as Git and the filesystem see them: raw on Unix, UTF-8 on Windows.
 pub fn os_bytes(value: &OsStr) -> Vec<u8> {
     #[cfg(unix)]
@@ -497,5 +620,54 @@ pub fn os_from_bytes(bytes: &[u8]) -> OsString {
     #[cfg(windows)]
     {
         OsString::from(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_paths_drop_only_the_windows_verbatim_prefix() {
+        assert_eq!(
+            without_verbatim_prefix(r"\\?\C:\Users\me\repo").as_deref(),
+            Some(r"C:\Users\me\repo")
+        );
+        assert_eq!(
+            without_verbatim_prefix(r"\\?\UNC\server\share\repo").as_deref(),
+            Some(r"\\server\share\repo")
+        );
+        assert_eq!(without_verbatim_prefix(r"\\?\Volume{1}\repo"), None);
+        assert_eq!(without_verbatim_prefix("/Users/me/repo"), None);
+        let directory = std::env::temp_dir().join(format!("wtm-platform-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let canonical = canonicalize(&directory).unwrap();
+        assert!(canonical.is_absolute() && !canonical.to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(
+            fs::canonicalize(&canonical).unwrap(),
+            fs::canonicalize(&directory).unwrap()
+        );
+        assert!(canonicalize(&directory.join("missing")).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn shared_links_name_the_same_file_and_others_do_not() {
+        let directory = std::env::temp_dir().join(format!("wtm-platform-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let (source, link, other) = (
+            directory.join("settings.json"),
+            directory.join("linked.json"),
+            directory.join("other.json"),
+        );
+        fs::write(&source, "{}").unwrap();
+        fs::write(&other, "{}").unwrap();
+        shared_link(&source, &link).unwrap();
+        assert!(same_file(&link, &source));
+        fs::write(&link, "{\"editor.fontSize\":18}").unwrap();
+        assert_eq!(fs::read(&source).unwrap(), b"{\"editor.fontSize\":18}");
+        assert!(!same_file(&other, &source));
+        assert!(!same_file(&directory.join("missing.json"), &source));
+        fs::remove_dir_all(directory).unwrap();
     }
 }

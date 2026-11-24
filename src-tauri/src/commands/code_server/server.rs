@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -65,7 +65,7 @@ impl Server {
         let profile = profile::prepare(root, &self.workspace_id)?;
         let log = profile.directory.join("server.log");
         let output = File::create(&log).map_err(|error| error.to_string())?;
-        let mut command = Command::new(binary);
+        let mut command = runtime::command(&binary);
         command
             .args(["--config"])
             .arg(profile.directory.join("config.yaml"))

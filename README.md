@@ -7,7 +7,7 @@ A macOS app for managing Git worktrees and Linear issues, built with Tauri, Reac
 - Group local repositories into workspaces; create a task with one worktree per repository.
 - Create branches from Linear issues and track Git status and linked PRs.
 - Open tasks in Cursor or Zed, or use VSCode, OpenCode, Claude Code and Codex inside the app.
-- Use an independent VSCode editor inside the app per task (macOS 14+).
+- Use an independent VSCode editor inside the app per task (macOS 14+ or Windows x64).
 - Keep optional Obsidian task notes, archived when tasks are removed.
 - Manage workspaces and tasks from the UI or the local `wtm` CLI.
 
@@ -77,7 +77,7 @@ Omit `--local` for the installed/shared profile. Bare `wtm` with this alias laun
 
 ### Windows
 
-The app builds and runs from source on Windows 10 (1803+) and 11; there is no Windows installer or in-app update yet. The embedded VS Code is not available there: choosing it opens desktop VS Code instead. Requires [Git for Windows](https://git-scm.com/downloads/win) (its Git Bash runs the app's commands and tools), Rust with the MSVC toolchain and the Visual Studio C++ Build Tools, Node.js 22.13+, and the pinned pnpm. WebView2 ships with Windows 11.
+The app builds and runs from source on Windows 10 (1803+) and 11; there is no Windows installer or in-app update yet. Coder publishes no Windows build of code-server, so the embedded VS Code downloads one this repository builds from code-server's npm package (the **Embedded editor for Windows** workflow, using `scripts/build-code-server-windows.sh`). Requires [Git for Windows](https://git-scm.com/downloads/win) (its Git Bash runs the app's commands and tools), Rust with the MSVC toolchain and the Visual Studio C++ Build Tools, Node.js 22.13+, and the pinned pnpm. WebView2 ships with Windows 11.
 
 The package scripts use Unix shell syntax, so start development from PowerShell directly:
 

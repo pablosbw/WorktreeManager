@@ -100,6 +100,80 @@ describe("shared editor process ownership", () => {
     expect(result.stdout.trim()).toBe("released");
   });
 
+  // node-pty on Windows reports the shell's pid only once its console connects.
+  const latePidTerminal = `
+    const cp = require('node:child_process');
+    const fs = require('node:fs');
+    const assert = require('node:assert/strict');
+    const { once } = require('node:events');
+    const until = async (condition) => {
+      for (const deadline = Date.now() + 4000; !condition(); ) {
+        if (Date.now() > deadline) throw new Error('condition not met');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    const read = (name) => fs.existsSync(fixture.directory + '/' + name)
+      ? fs.readFileSync(fixture.directory + '/' + name, 'utf8') : null;
+    const startShell = () => {
+      const shell = cp.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        detached: process.platform !== 'win32'
+      });
+      const exits = [];
+      shell.on('exit', () => exits.forEach((listener) => listener()));
+      const pty = { pid: 0, onExit: (listener) => exits.push(listener), kill: () => shell.kill() };
+      const env = { ...process.env, WTM_TASK_ID: 'task-a', WTM_EDITOR_SESSION: fixture.generation };
+      assert.equal(globalThis.__wtmSpawnPty(() => pty, 'shell', [], { env }), pty);
+      assert.equal(read('terminals'), null);
+      return { shell, pty, exited: once(shell, 'exit') };
+    };
+  `;
+
+  it("records a terminal whose pid is reported after it starts", async () => {
+    const data = await fixture();
+    const script = `
+      const fixture = ${JSON.stringify(data)};
+      ${latePidTerminal}
+      (async () => {
+        const { shell, pty, exited } = startShell();
+        pty.pid = shell.pid;
+        await until(() => read('terminals') === shell.pid + '\\n');
+        assert.equal(read('groups'), shell.pid + '\\n');
+        shell.kill();
+        await exited;
+        await until(() => read('terminals') === '' && read('groups') === '');
+        console.log('recorded');
+      })().catch(error => { console.error(error); process.exitCode = 1; });
+    `;
+    const result = await execute(process.execPath, ["--require", preload, "-e", script], {
+      env: { ...process.env, WTM_EDITOR_CONTROL: data.root },
+      timeout: 10000,
+    });
+    expect(result.stdout.trim()).toBe("recorded");
+  });
+
+  it("ends a terminal whose session closed before its pid was reported", async () => {
+    const data = await fixture();
+    const script = `
+      const fixture = ${JSON.stringify(data)};
+      ${latePidTerminal}
+      (async () => {
+        const { shell, pty, exited } = startShell();
+        fs.unlinkSync(fixture.directory + '/active.json');
+        pty.pid = shell.pid;
+        await exited;
+        assert.equal(read('terminals'), null);
+        assert.equal(read('groups'), null);
+        assert.equal(fs.existsSync(fixture.directory + '/lock'), false);
+        console.log('ended');
+      })().catch(error => { console.error(error); process.exitCode = 1; });
+    `;
+    const result = await execute(process.execPath, ["--require", preload, "-e", script], {
+      env: { ...process.env, WTM_EDITOR_CONTROL: data.root },
+      timeout: 10000,
+    });
+    expect(result.stdout.trim()).toBe("ended");
+  });
+
   it("rejects closed, mismatched and missing sessions before spawning", async () => {
     const data = await fixture();
     const script = `

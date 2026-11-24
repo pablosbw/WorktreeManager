@@ -78,16 +78,7 @@ impl Session {
         if groups.is_empty() {
             return Some(false);
         }
-        let output = std::process::Command::new("/bin/ps")
-            .args(["-axo", "ppid="])
-            .output()
-            .ok()?;
-        let stdout = output.status.success().then_some(output.stdout)?;
-        let parents = std::str::from_utf8(&stdout)
-            .ok()?
-            .lines()
-            .map(|line| line.trim().parse::<u32>().ok())
-            .collect::<Option<Vec<_>>>()?;
+        let parents = parent_pids()?;
         Some(parents.iter().any(|parent| groups.contains(parent)))
     }
 
@@ -147,6 +138,31 @@ impl Session {
         let _ = fs::remove_dir_all(&self.directory);
         Ok(())
     }
+}
+
+/// The parent of every running process.
+#[cfg(not(windows))]
+fn parent_pids() -> Option<Vec<u32>> {
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-axo", "ppid="])
+        .output()
+        .ok()?;
+    let stdout = output.status.success().then_some(output.stdout)?;
+    std::str::from_utf8(&stdout)
+        .ok()?
+        .lines()
+        .map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+#[cfg(windows)]
+fn parent_pids() -> Option<Vec<u32>> {
+    Some(
+        crate::platform::parent_pids()?
+            .into_iter()
+            .map(|(_, parent)| parent)
+            .collect(),
+    )
 }
 
 fn signal(group: i32, force: bool) -> Result<(), String> {

@@ -123,7 +123,11 @@ async function setup(
   const receive: (response: TrustResponse) => void = () => {
     throw new Error("Trust receiver not installed");
   };
+  const events = new EventTarget();
+  const unload = () => events.dispatchEvent(new globalThis.Event("beforeunload"));
+  let unloadOnNavigation = true;
   const sandbox = {
+    addEventListener: events.addEventListener.bind(events),
     window: undefined as unknown,
     top: undefined as unknown,
     __worktreeTrustReceive: receive,
@@ -146,6 +150,8 @@ async function setup(
       origin,
       host: authority,
       set href(target: string) {
+        // Chromium (WebView2) dispatches beforeunload before the app cancels the navigation.
+        if (unloadOnNavigation) unload();
         const url = new URL(target);
         expect(url.pathname).toBe("/__worktreemanager_trust");
         expect(url.searchParams.get("token")).toBe("session-token");
@@ -189,6 +195,12 @@ async function setup(
     messages,
     shared,
     context,
+    events,
+    unload,
+    // WebKit consults the app before dispatching beforeunload, so a cancelled request skips it.
+    skipUnloadOnNavigation: () => {
+      unloadOnNavigation = false;
+    },
     delayReplies: (milliseconds: number) => {
       replyDelay = milliseconds;
     },
@@ -259,6 +271,18 @@ describe("embedded editor workspace trust", () => {
     editor.receive(["/repos"], 11);
     await vi.waitFor(async () =>
       expect(await read(editor.database)).toBe(value(["/repos", workspace]))
+    );
+  });
+
+  it("covers Windows repositories whatever the case of their drive letter", async () => {
+    const editor = await setup({
+      shared: ["/C:/repos"],
+      folders: ["/c:/repos/one", "/C:/repos/two"],
+    });
+    expect(await read(editor.database)).toBe(value(["/C:/repos", workspace]));
+    editor.receive(["/C:/repos-other"]);
+    await vi.waitFor(async () =>
+      expect(await read(editor.database)).toBe(value(["/C:/repos-other"]))
     );
   });
 
@@ -364,6 +388,30 @@ describe("embedded editor workspace trust", () => {
     expect(await read(editor.database)).toBe(value([]));
     expect(editor.changes).toHaveLength(1);
     expect(editor.messages.at(-1)?.changed.get(trustKey)).toBe(value([]));
+  });
+
+  it("keeps its requests from looking like the window closing to VS Code", async () => {
+    const editor = await setup({ shared: ["/repos"] });
+    const closing = vi.fn();
+    editor.events.addEventListener("beforeunload", closing);
+    await write(editor.database, { [trustKey]: value(["/other"]) });
+    await vi.waitFor(() => expect(editor.changes).toHaveLength(2));
+    await vi.waitFor(async () => expect(await read(editor.database)).toBe(value(["/other"])));
+    expect(closing).not.toHaveBeenCalled();
+    editor.unload();
+    expect(closing).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not hide a later close when the browser skipped beforeunload", async () => {
+    const editor = await setup();
+    editor.skipUnloadOnNavigation();
+    const closing = vi.fn();
+    editor.events.addEventListener("beforeunload", closing);
+    const applied = editor.messages.length;
+    await write(editor.database, { [trustKey]: value(["/repos"]) });
+    await vi.waitFor(() => expect(editor.messages.length).toBeGreaterThan(applied));
+    editor.unload();
+    expect(closing).toHaveBeenCalledTimes(1);
   });
 
   it("reports persistence failures instead of silently claiming the decision was shared", async () => {

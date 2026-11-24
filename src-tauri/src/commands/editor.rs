@@ -81,11 +81,6 @@ fn open_editor_blocking(
         "cursor" => open_workspace_editor("Cursor"),
         "claude-code" => Err("Claude Code runs embedded; use terminal_open".to_string()),
         "codex" => Err("Codex runs embedded; use terminal_open".to_string()),
-        // The embedded editor (code-server) has no Windows build; open desktop VS Code instead.
-        // TODO(windows): embed VS Code on Windows, e.g. on Microsoft's VS Code web server build.
-        #[cfg(windows)]
-        "vscode-web" => open_workspace_editor(VSCODE_APP),
-        #[cfg(not(windows))]
         "vscode-web" => Err("VS Code runs embedded; use vscode_open".to_string()),
         "opencode-web" => Err("OpenCode runs embedded; use opencode_open".to_string()),
         "zed" => Ok(OpenEditorResult::message(open_zed(&folders)?)),
@@ -144,9 +139,6 @@ fn open_zed(folders: &[String]) -> Result<String, String> {
 pub fn check_app_installed(editor: String) -> Result<bool, String> {
     match editor.as_str() {
         "cursor" => Ok(gui_app_exists("Cursor")),
-        #[cfg(windows)]
-        "vscode-web" => Ok(cli_available(windows_cli(VSCODE_APP))),
-        #[cfg(not(windows))]
         "vscode-web" => Ok(true),
         "opencode-web" => Ok(cli_available("opencode")),
         "claude-code" => Ok(Agents::default().get("claude")?.installed()),
@@ -156,14 +148,10 @@ pub fn check_app_installed(editor: String) -> Result<bool, String> {
     }
 }
 
-#[cfg(windows)]
-const VSCODE_APP: &str = "Visual Studio Code";
-
 /// The command-line launcher a Windows GUI editor installs on `PATH`.
 #[cfg(windows)]
 fn windows_cli(app_name: &str) -> &str {
     match app_name {
-        VSCODE_APP => "code",
         "Cursor" => "cursor",
         "Zed" => "zed",
         "Obsidian" => "obsidian",
@@ -180,19 +168,12 @@ pub(crate) fn gui_app_exists(app_name: &str) -> bool {
         std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from),
         std::env::var_os("ProgramFiles").map(std::path::PathBuf::from),
     ];
-    let folders: &[&str] = match app_name {
-        VSCODE_APP => &["Microsoft VS Code"],
-        other => &[other],
-    };
-    let exe = match app_name {
-        VSCODE_APP => "Code.exe".to_string(),
-        other => format!("{other}.exe"),
-    };
-    roots.iter().flatten().any(|root| {
-        folders
-            .iter()
-            .any(|folder| root.join(folder).join(&exe).is_file())
-    }) || cli_available(windows_cli(app_name))
+    let exe = format!("{app_name}.exe");
+    roots
+        .iter()
+        .flatten()
+        .any(|root| root.join(app_name).join(&exe).is_file())
+        || cli_available(windows_cli(app_name))
 }
 
 /// True when macOS LaunchServices knows an app bundle by this name.

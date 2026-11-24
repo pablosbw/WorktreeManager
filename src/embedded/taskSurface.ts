@@ -1,4 +1,3 @@
-import { IS_WINDOWS } from "../platform";
 import { AgentId, AgentViews, DEFAULT_AGENT_VIEWS, EditorApp, TaskSurface } from "../types";
 
 const EDITOR_AGENTS: Partial<Record<EditorApp, AgentId>> = {
@@ -23,9 +22,7 @@ export function taskSurfaceFor(
   views: AgentViews = DEFAULT_AGENT_VIEWS,
   taskAgent?: AgentId
 ): TaskSurface {
-  // The embedded editor (code-server) has no Windows build; VS Code opens as a desktop app there.
-  // TODO(windows): embed VS Code on Windows, e.g. on Microsoft's VS Code web server build.
-  if (editor === "vscode-web") return IS_WINDOWS ? { kind: "external" } : { kind: "editor" };
+  if (editor === "vscode-web") return { kind: "editor" };
   if (editor === "opencode-web") return { kind: "opencode" };
   const agent = EDITOR_AGENTS[editor];
   return agent ? agentSurface(taskAgent ?? agent, views) : { kind: "external" };

@@ -299,9 +299,7 @@ export async function runDoctor(
           detail: config.keychainError,
         })
       : checkLinearKeys(config.linearKeys, deps),
-    config.editor === "vscode-web" && !IS_WINDOWS
-      ? checkEmbeddedEditor(deps.editorProbe)
-      : Promise.resolve(null),
+    config.editor === "vscode-web" ? checkEmbeddedEditor(deps.editorProbe) : Promise.resolve(null),
     config.vaultEnabled
       ? Promise.all(
           (["codex", "claude"] as const).map((agent) =>

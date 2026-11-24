@@ -4,11 +4,20 @@ const childProcess = require("node:child_process");
 const { syncBuiltinESMExports } = require("node:module");
 
 const controlRoot = process.env.WTM_EDITOR_CONTROL;
+// Unix tracks each child as the leader of its own process group; Windows has no groups, so it
+// tracks the child's process tree, which the app ends with `taskkill /T`.
+const windows = process.platform === "win32";
+const group = (pid) => (windows ? pid : -pid);
+
+function killGroup(pid) {
+  if (!windows) return process.kill(-pid, "SIGKILL");
+  childProcess.spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true });
+}
 
 function forgetExitedGroup(directory, pid) {
   const retry = () => setTimeout(() => forgetExitedGroup(directory, pid), 1000).unref();
   try {
-    process.kill(-pid, 0);
+    process.kill(group(pid), 0);
     retry();
     return;
   } catch (error) {
@@ -39,13 +48,9 @@ function forgetExitedGroup(directory, pid) {
   }
 }
 
-function track(env, spawn, terminal = false) {
-  const generation = env?.WTM_EDITOR_SESSION;
-  if (!controlRoot) return spawn();
-  if (!/^[a-f0-9]{48}$/.test(generation ?? "")) {
-    throw new Error("Missing WTM editor session");
-  }
-  const directory = path.join(controlRoot, generation);
+const started = (pid) => Number.isInteger(pid) && pid > 1;
+
+function locked(directory, action) {
   const lock = path.join(directory, "lock");
   const deadline = Date.now() + 3000;
   while (true) {
@@ -58,27 +63,74 @@ function track(env, spawn, terminal = false) {
     }
   }
   try {
-    const session = JSON.parse(fs.readFileSync(path.join(directory, "active.json"), "utf8"));
-    if (session.taskId !== env.WTM_TASK_ID) throw new Error("WTM editor session mismatch");
-    const child = spawn();
-    if (!Number.isInteger(child.pid) || child.pid <= 1)
-      throw new Error("Editor process did not start");
-    try {
-      fs.appendFileSync(path.join(directory, "groups"), `${child.pid}\n`);
-      if (terminal) fs.appendFileSync(path.join(directory, "terminals"), `${child.pid}\n`);
-    } catch (error) {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {}
-      throw error;
-    }
-    const exited = () => forgetExitedGroup(directory, child.pid);
-    if (typeof child.onExit === "function") child.onExit(exited);
-    else child.once("exit", exited);
-    return child;
+    return action();
   } finally {
     fs.rmdirSync(lock);
   }
+}
+
+function checkSession(directory, env) {
+  const session = JSON.parse(fs.readFileSync(path.join(directory, "active.json"), "utf8"));
+  if (session.taskId !== env.WTM_TASK_ID) throw new Error("WTM editor session mismatch");
+}
+
+function record(directory, child, terminal) {
+  try {
+    fs.appendFileSync(path.join(directory, "groups"), `${child.pid}\n`);
+    if (terminal) fs.appendFileSync(path.join(directory, "terminals"), `${child.pid}\n`);
+  } catch (error) {
+    try {
+      killGroup(child.pid);
+    } catch {}
+    throw error;
+  }
+  const exited = () => forgetExitedGroup(directory, child.pid);
+  if (typeof child.onExit === "function") child.onExit(exited);
+  else child.once("exit", exited);
+}
+
+// node-pty on Windows learns the shell's pid only once its console connects, after spawn
+// returns. Record the terminal then, if its session is still open; otherwise end it.
+function recordWhenStarted(directory, env, child) {
+  let ended = false;
+  child.onExit(() => (ended = true));
+  const deadline = Date.now() + 10000;
+  const poll = () => {
+    if (ended) return;
+    if (!started(child.pid)) {
+      if (Date.now() < deadline) setTimeout(poll, 10);
+      else child.kill();
+      return;
+    }
+    try {
+      locked(directory, () => {
+        checkSession(directory, env);
+        record(directory, child, true);
+      });
+    } catch {
+      try {
+        killGroup(child.pid);
+      } catch {}
+    }
+  };
+  setTimeout(poll, 10);
+}
+
+function track(env, spawn, terminal = false) {
+  const generation = env?.WTM_EDITOR_SESSION;
+  if (!controlRoot) return spawn();
+  if (!/^[a-f0-9]{48}$/.test(generation ?? "")) {
+    throw new Error("Missing WTM editor session");
+  }
+  const directory = path.join(controlRoot, generation);
+  return locked(directory, () => {
+    checkSession(directory, env);
+    const child = spawn();
+    if (started(child.pid)) record(directory, child, terminal);
+    else if (terminal && child.pid === 0) recordWhenStarted(directory, env, child);
+    else throw new Error("Editor process did not start");
+    return child;
+  });
 }
 
 if (controlRoot) {
@@ -88,7 +140,7 @@ if (controlRoot) {
       return fork.call(this, modulePath, args, options);
     }
     return track(options?.env, () =>
-      fork.call(this, modulePath, args, { ...options, detached: true })
+      fork.call(this, modulePath, args, { ...options, detached: !windows })
     );
   };
   syncBuiltinESMExports();

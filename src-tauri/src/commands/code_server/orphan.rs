@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::Path;
+#[cfg(not(windows))]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,31 @@ pub fn reclaim(profile: &Path) {
     }
 }
 
+/// Windows keeps no command line in reach and never reparents to 1: an orphan is a process that
+/// runs one of this app's editor runtimes and whose parent has exited.
+#[cfg(windows)]
+fn orphan_running(pid: i32, profile: &Path) -> bool {
+    let pid = pid as u32;
+    let Some(runtimes) = profile
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join("runtime").to_string_lossy().to_lowercase())
+    else {
+        return false;
+    };
+    let runs_editor = crate::platform::process_image(pid).is_some_and(|image| {
+        image
+            .to_string_lossy()
+            .to_lowercase()
+            .starts_with(&runtimes)
+    });
+    let parent = crate::platform::parent_pids()
+        .and_then(|pairs| pairs.into_iter().find(|(child, _)| *child == pid))
+        .map(|(_, parent)| parent);
+    runs_editor && parent.is_some_and(|parent| !crate::platform::process_alive(parent))
+}
+
+#[cfg(not(windows))]
 fn orphan_running(pid: i32, profile: &Path) -> bool {
     let data = profile.join("data").to_string_lossy().into_owned();
     Command::new("/bin/ps")

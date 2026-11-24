@@ -1,0 +1,65 @@
+name: Embedded editor for Windows
+
+# Coder publishes no Windows build of code-server, so this builds the version the app pins
+# (src-tauri/src/commands/code_server/runtime.rs) from its npm package and publishes it as the
+# asset the app downloads. Run it when that version changes, then pin the printed SHA-256 as
+# WINDOWS_SHA256 in runtime.rs.
+on:
+  workflow_dispatch:
+    inputs:
+      code-server:
+        description: "code-server version (runtime::VERSION)"
+        required: true
+        default: "4.136.2"
+      node:
+        description: "Node.js version code-server's engines field accepts"
+        required: true
+        default: "24.22.3"
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build and publish code-server for Windows
+    runs-on: windows-2025
+    permissions:
+      contents: write # create the release and upload the archive
+    env:
+      CODE_SERVER_VERSION: ${{ inputs.code-server }}
+      NODE_VERSION: ${{ inputs.node }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # VS Code's native modules link Spectre-mitigated runtimes (MSB8040 without them).
+      - name: Ensure Spectre-mitigated MSVC libraries
+        shell: pwsh
+        run: |
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
+          $component = "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre"
+          $path = & "$installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $present = & "$installer\vswhere.exe" -latest -products * -requires $component -property installationPath
+          if (-not $present) {
+            Start-Process -Wait -FilePath "$installer\vs_installer.exe" -ArgumentList "modify", "--installPath", "`"$path`"", "--add", $component, "--quiet", "--norestart", "--nocache"
+          }
+
+      - name: Build
+        shell: bash
+        run: sh scripts/build-code-server-windows.sh "$CODE_SERVER_VERSION" "$NODE_VERSION" dist-editor
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="code-server-v$CODE_SERVER_VERSION"
+          archive="dist-editor/code-server-$CODE_SERVER_VERSION-win32-x64.tar.gz"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "Embedded editor: code-server $CODE_SERVER_VERSION for Windows" \
+              --notes "code-server $CODE_SERVER_VERSION built for Windows x64 from its npm package with Node.js $NODE_VERSION. Not an app release." \
+              --latest=false
+          fi
+          # No --clobber: installs pin the published archive's SHA-256, so it is never replaced.
+          gh release upload "$tag" "$archive" "$archive.sha256"
+          echo "Pin this as WINDOWS_SHA256 in src-tauri/src/commands/code_server/runtime.rs: $(cat "$archive.sha256")" >> "$GITHUB_STEP_SUMMARY"

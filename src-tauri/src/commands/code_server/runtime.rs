@@ -30,27 +30,93 @@ pub fn root(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-fn distribution() -> Result<(&'static str, &'static str), String> {
+/// Coder publishes no Windows build, so the app builds one from code-server's npm package
+/// (`scripts/build-code-server-windows.sh`) and publishes it with its own releases.
+const WINDOWS_RELEASE: &str = "https://github.com/pibahamondesw/WorktreeManager/releases/download";
+
+/// The archive's platform suffix, its SHA-256 and where it is downloaded from.
+fn distribution() -> Result<(&'static str, &'static str, String), String> {
+    let coder = |platform: &str| {
+        format!("https://github.com/coder/code-server/releases/download/v{VERSION}/code-server-{VERSION}-{platform}.tar.gz")
+    };
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok((
             "macos-arm64",
             "ef21c1bbe914fbb38b0103e6fe91d7ed51a493491d2a4d342f89ca7b41e224b9",
+            coder("macos-arm64"),
         )),
         ("macos", "x86_64") => Ok((
             "macos-amd64",
             "f9598d035ddebde223d808f38ea71ca380fbed220468108d383f3b6f6fd78362",
+            coder("macos-amd64"),
         )),
-        _ => Err("The embedded editor currently requires macOS.".into()),
+        ("windows", "x86_64") => Ok((
+            "win32-x64",
+            WINDOWS_SHA256,
+            format!(
+                "{WINDOWS_RELEASE}/code-server-v{VERSION}/code-server-{VERSION}-win32-x64.tar.gz"
+            ),
+        )),
+        _ => Err("The embedded editor currently requires macOS or 64-bit Windows.".into()),
     }
 }
 
+/// The SHA-256 the release workflow prints for the Windows archive it publishes.
+const WINDOWS_SHA256: &str = "";
+
+/// What starts the editor, relative to its release directory: coder's launcher script, or on
+/// Windows the bundled Node.js, which runs `out/node/entry.js` (see [`command`]).
+#[cfg(not(windows))]
+const EXECUTABLE: &str = "bin/code-server";
+#[cfg(windows)]
+const EXECUTABLE: &str = "lib/node.exe";
+
+#[cfg(not(windows))]
+const RUNTIME_FILES: &[&str] = &[
+    "bin/code-server",
+    "lib/node",
+    "out/node/entry.js",
+    "lib/vscode/package.json",
+];
+#[cfg(windows)]
+const RUNTIME_FILES: &[&str] = &[
+    "lib/node.exe",
+    "out/node/entry.js",
+    "lib/vscode/package.json",
+];
+
 pub fn binary(root: &Path) -> Result<PathBuf, String> {
-    Ok(root
-        .join("runtime")
-        .join(format!("code-server-{VERSION}-{}", distribution()?.0))
-        .join("bin/code-server"))
+    Ok(release_executable(&root.join("runtime").join(format!(
+        "code-server-{VERSION}-{}",
+        distribution()?.0
+    ))))
 }
 
+pub fn release_executable(release: &Path) -> PathBuf {
+    release.join(EXECUTABLE)
+}
+
+/// A command that runs the editor `executable` (from [`binary`] or a prepared copy of it).
+pub fn command(executable: &Path) -> Command {
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    {
+        let release = executable
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(executable);
+        command.arg(release.join("out/node/entry.js"));
+        crate::platform::hide_console(&mut command);
+    }
+    command
+}
+
+#[cfg(windows)]
+pub fn supported_os() -> bool {
+    true
+}
+
+#[cfg(not(windows))]
 pub fn supported_os() -> bool {
     Command::new("/usr/bin/sw_vers")
         .arg("-productVersion")
@@ -90,14 +156,9 @@ fn runtime_available(root: &Path) -> bool {
 }
 
 fn runtime_files_present(directory: &Path) -> bool {
-    [
-        "bin/code-server",
-        "lib/node",
-        "out/node/entry.js",
-        "lib/vscode/package.json",
-    ]
-    .iter()
-    .all(|file| directory.join(file).is_file())
+    RUNTIME_FILES
+        .iter()
+        .all(|file| directory.join(file).is_file())
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -132,6 +193,7 @@ pub fn scrub_environment(command: &mut Command) {
             command.env_remove(key);
         }
     }
+    #[cfg(not(windows))]
     command.env(
         "PATH",
         format!(
@@ -140,14 +202,41 @@ pub fn scrub_environment(command: &mut Command) {
             std::env::var("PATH").unwrap_or_default()
         ),
     );
+    #[cfg(windows)]
+    if let Some(path) = crate::platform::fresh_path() {
+        command.env("PATH", path);
+    }
 }
 
+/// 48 random hex digits; `session.cjs` checks session ids against that shape.
 pub fn random_id() -> Result<String, String> {
     let mut bytes = [0u8; 24];
+    #[cfg(not(windows))]
     File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    {
+        // From two v4 UUIDs of the OS generator: about 180 of the 192 bits are random.
+        let random = [uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let source: Vec<u8> = random.iter().flat_map(|id| *id.as_bytes()).collect();
+        bytes.copy_from_slice(&source[..24]);
+    }
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// The tar that extracts the editor archive: Windows ships bsdtar, which the build also uses.
+fn tar() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32")
+            .join("tar.exe")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/usr/bin/tar")
+    }
 }
 
 pub fn write_new(path: &Path, content: &[u8], private: bool) -> Result<(), String> {
@@ -316,7 +405,12 @@ fn install_runtime(root: &Path, installation: &Installation) -> Result<RuntimeIn
         return Err("VS Code embedded requires macOS 14 or later.".into());
     }
     fs::create_dir_all(root).map_err(|error| error.to_string())?;
-    let (platform, hash) = distribution()?;
+    let (platform, hash, url) = distribution()?;
+    if hash.is_empty() {
+        return Err(format!(
+            "No published build of code-server {VERSION} for this platform yet."
+        ));
+    }
     let executable = binary(root)?;
     if !runtime_available(root) {
         let staging = root.join(format!("download-{}", random_id()?));
@@ -336,9 +430,6 @@ fn install_runtime(root: &Path, installation: &Installation) -> Result<RuntimeIn
                 .timeout(Duration::from_secs(600))
                 .build()
                 .map_err(|error| error.to_string())?;
-            let url = format!(
-                "https://github.com/coder/code-server/releases/download/v{VERSION}/{name}.tar.gz"
-            );
             let mut response = client
                 .get(url)
                 .send()
@@ -395,7 +486,7 @@ fn install_runtime(root: &Path, installation: &Installation) -> Result<RuntimeIn
                 total,
             );
             run_checked(
-                Command::new("/usr/bin/tar")
+                crate::platform::hide_console(&mut Command::new(tar()))
                     .arg("-xzf")
                     .arg(&archive)
                     .arg("-C")
@@ -434,7 +525,7 @@ fn install_runtime(root: &Path, installation: &Installation) -> Result<RuntimeIn
         0,
         None,
     );
-    let mut command = Command::new(executable);
+    let mut command = command(&executable);
     command.arg("--version");
     scrub_environment(&mut command);
     run_checked(

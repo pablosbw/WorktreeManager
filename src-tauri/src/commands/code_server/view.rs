@@ -72,10 +72,12 @@ fn editor_webview<R: EditorRuntime>(
         .url
         .parse::<tauri::Url>()
         .map_err(|error| error.to_string())?;
+    // code-server reads only values starting with `/` as paths on its server.
+    let workspace_param = super::profile::server_path(workspace);
     let mut initial = origin.clone();
     initial
         .query_pairs_mut()
-        .append_pair("workspace", &workspace.to_string_lossy());
+        .append_pair("workspace", &workspace_param);
     let browser_store = md5::compute(format!(
         "{}:workspace:{}",
         app.config().identifier,
@@ -95,7 +97,7 @@ fn editor_webview<R: EditorRuntime>(
         app: app.clone(),
         trust,
         origin,
-        workspace: workspace.to_string_lossy().to_string(),
+        workspace: workspace_param,
         shutdown_url: shutdown_url.clone(),
         unloaded: unloaded.clone(),
     });

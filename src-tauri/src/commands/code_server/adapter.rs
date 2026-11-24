@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -38,45 +39,79 @@ pub fn prepare(root: &Path) -> Result<PathBuf, String> {
         source.file_name().unwrap().to_string_lossy()
     ));
     if target.join("wtm-ready").is_file() {
-        return Ok(target.join("bin/code-server"));
+        return Ok(runtime::release_executable(&target));
     }
     let temporary = target.with_extension(runtime::random_id()?);
     let result = (|| {
-        let output = Command::new("/bin/cp")
-            .arg("-cR")
-            .arg(&source)
-            .arg(&temporary)
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !output.status.success() {
-            return Err(format!(
-                "Could not prepare shared editor runtime: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
+        clone_runtime(&source, &temporary)?;
         for (file, before, after) in PATCHES {
             let path = temporary.join(file);
             let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-            fs::write(path, replace_once(&source, before, after)?)
-                .map_err(|error| error.to_string())?;
+            rewrite(&path, replace_once(&source, before, after)?)?;
         }
         for (file, preload) in PRELOADS {
             let path = temporary.join(file);
             let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-            fs::write(path, format!("import {preload:?};\n{source}"))
-                .map_err(|error| error.to_string())?;
+            rewrite(&path, format!("import {preload:?};\n{source}"))?;
         }
         fs::write(temporary.join("session.cjs"), include_str!("session.cjs"))
             .map_err(|error| error.to_string())?;
         fs::write(temporary.join("wtm-ready"), runtime::VERSION)
             .map_err(|error| error.to_string())?;
         fs::rename(&temporary, &target).map_err(|error| error.to_string())?;
-        Ok(target.join("bin/code-server"))
+        Ok(runtime::release_executable(&target))
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(temporary);
     }
     result
+}
+
+/// Copies the runtime without duplicating its files: APFS clones on macOS, hard links on Windows.
+#[cfg(not(windows))]
+fn clone_runtime(source: &Path, target: &Path) -> Result<(), String> {
+    let output = Command::new("/bin/cp")
+        .arg("-cR")
+        .arg(source)
+        .arg(target)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not prepare shared editor runtime: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn clone_runtime(source: &Path, target: &Path) -> Result<(), String> {
+    fn link_tree(source: &Path, target: &Path) -> std::io::Result<()> {
+        fs::create_dir(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let (from, to) = (entry.path(), target.join(entry.file_name()));
+            if fs::metadata(&from)?.is_dir() {
+                link_tree(&from, &to)?;
+            } else if entry.file_type()?.is_symlink() {
+                fs::copy(&from, &to)?;
+            } else {
+                fs::hard_link(&from, &to)?;
+            }
+        }
+        Ok(())
+    }
+    link_tree(source, target)
+        .map_err(|error| format!("Could not prepare shared editor runtime: {error}"))
+}
+
+/// Replaces `path` with new content without writing through to files it shares data with (hard
+/// links or clones of the original runtime).
+fn rewrite(path: &Path, content: String) -> Result<(), String> {
+    fs::remove_file(path)
+        .and_then(|_| fs::write(path, content))
+        .map_err(|error| error.to_string())
 }
 
 fn replace_once(source: &str, before: &str, after: &str) -> Result<String, String> {

@@ -20,7 +20,7 @@ pub fn canonical_folders(folders: Vec<String>) -> Result<Vec<PathBuf>, String> {
     folders
         .into_iter()
         .map(|folder| {
-            let path = fs::canonicalize(&folder)
+            let path = crate::platform::canonicalize(Path::new(&folder))
                 .map_err(|error| format!("Cannot open {folder}: {error}"))?;
             if !path.is_dir() {
                 return Err(format!("Not a folder: {folder}"));
@@ -28,6 +28,38 @@ pub fn canonical_folders(folders: Vec<String>) -> Result<Vec<PathBuf>, String> {
             Ok(path)
         })
         .collect()
+}
+
+/// A path as VS Code names it on the editor's server (a `vscode-remote` URI's path): the path
+/// itself, or for a Windows path `C:\dir` the form VS Code gives remote Windows paths, `/c:/dir`.
+pub fn server_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && &bytes[1..3] == b":\\" {
+        let drive = bytes[0].to_ascii_lowercase() as char;
+        return format!("/{drive}{}", text[1..].replace('\\', "/"));
+    }
+    text.into_owned()
+}
+
+/// The local path a [`server_path`] names.
+pub fn local_path(value: &str) -> PathBuf {
+    local_path_on(value, cfg!(windows))
+}
+
+/// `/c:/dir` is `C:\dir` on Windows; elsewhere every value is already a local path.
+fn local_path_on(value: &str, windows: bool) -> PathBuf {
+    let bytes = value.as_bytes();
+    let drive = bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic();
+    if windows && drive && bytes[2] == b':' && (bytes.len() == 3 || bytes[3] == b'/') {
+        let letter = bytes[1].to_ascii_uppercase() as char;
+        let rest = value[3..].replace('/', "\\");
+        return PathBuf::from(format!(
+            "{letter}:{}",
+            if rest.is_empty() { "\\" } else { &rest }
+        ));
+    }
+    PathBuf::from(value)
 }
 
 pub fn prepare(root: &Path, workspace_id: &str) -> Result<Profile, String> {
@@ -51,9 +83,9 @@ pub fn prepare(root: &Path, workspace_id: &str) -> Result<Profile, String> {
         write_new(&source, content.as_bytes(), false)?;
         let target = user.join(name);
         if !target.try_exists().map_err(|error| error.to_string())? {
-            crate::platform::symlink(&source, &target).map_err(|error| error.to_string())?;
+            crate::platform::shared_link(&source, &target).map_err(|error| error.to_string())?;
         }
-        if fs::canonicalize(&target).ok() != fs::canonicalize(&source).ok() {
+        if !crate::platform::same_file(&target, &source) {
             return Err(format!(
                 "Shared preferences were replaced at {}. Restore the link before reopening.",
                 target.display()
@@ -136,6 +168,27 @@ fn replace_file(path: &Path, content: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_paths_round_trip_through_vs_code_server_paths() {
+        assert_eq!(
+            server_path(Path::new(r"C:\Users\me\task.code-workspace")),
+            "/c:/Users/me/task.code-workspace"
+        );
+        assert_eq!(server_path(Path::new("/repos/a")), "/repos/a");
+        assert_eq!(server_path(Path::new("C:relative")), "C:relative");
+        assert_eq!(
+            local_path_on("/c:/Users/me", true),
+            PathBuf::from(r"C:\Users\me")
+        );
+        assert_eq!(local_path_on("/c:", true), PathBuf::from(r"C:\"));
+        assert_eq!(
+            local_path_on("/c:/Users", false),
+            PathBuf::from("/c:/Users")
+        );
+        assert_eq!(local_path_on("/cd/Users", true), PathBuf::from("/cd/Users"));
+        assert_eq!(local_path("/repos/a"), PathBuf::from("/repos/a"));
+    }
 
     #[test]
     fn workspace_profiles_share_preferences_and_keep_separate_global_state() {

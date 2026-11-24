@@ -17,6 +17,21 @@ function synchronizeWorkspaceTrust(config) {
   let latestSnapshot;
   let pendingChanges = 0;
   let queue = Promise.resolve();
+  let bridgeNavigation = false;
+
+  // Chromium (WebView2) dispatches beforeunload before the app cancels a bridge request's
+  // navigation, and VS Code treats it as the window closing: it shuts the workbench down, or asks
+  // to leave while terminals run. The request never leaves the page, so VS Code must not see it.
+  // Requests go out one at a time (see enqueue), so one flag covers the one in flight.
+  window.addEventListener(
+    "beforeunload",
+    (event) => {
+      if (!bridgeNavigation) return;
+      bridgeNavigation = false;
+      event.stopImmediatePropagation();
+    },
+    true
+  );
 
   function report(error) {
     console.error("Unable to synchronize workspace trust", error);
@@ -33,12 +48,14 @@ function synchronizeWorkspaceTrust(config) {
       const id = ++nextId;
       const timeout = setTimeout(() => {
         pending.delete(id);
+        bridgeNavigation = false;
         reject(new Error("WorktreeManager did not respond. Reopen the editor to retry."));
       }, 10000);
       pending.set(id, { resolve, reject, timeout });
       const target = new URL(config.endpoint, config.origin);
       target.searchParams.set("token", config.token);
       target.searchParams.set("message", JSON.stringify({ id, documentId, change }));
+      bridgeNavigation = true;
       location.href = target.href;
     });
   }
@@ -47,6 +64,8 @@ function synchronizeWorkspaceTrust(config) {
     if (id !== undefined && sourceDocument !== documentId) return;
     const response = pending.get(id);
     if (response) {
+      // The app has handled the navigation; browsers that skip beforeunload leave the flag set.
+      bridgeNavigation = false;
       clearTimeout(response.timeout);
       pending.delete(id);
       if (error) response.reject(new Error(error));
@@ -89,14 +108,20 @@ function synchronizeWorkspaceTrust(config) {
     return relative.length === 2 && relative[1] === "task.code-workspace";
   }
 
+  // VS Code names a Windows folder `/C:/dir` when the workspace file lists it and `/c:/dir` in
+  // URLs, and compares drive letters without case; so must the coverage check below.
+  function comparable(path) {
+    return path.replace(/^\/([A-Za-z]):(?=\/|$)/, (_, drive) => `/${drive.toLowerCase()}:`);
+  }
+
   function trustValue(paths, workspaces, unrelated) {
     const trusted = new Set(paths);
     const includes = (folder) =>
-      [...trusted].some(
-        (path) => folder === path || folder.startsWith(path === "/" ? "/" : `${path}/`)
-      );
+      [...trusted]
+        .map(comparable)
+        .some((path) => folder === path || folder.startsWith(path === "/" ? "/" : `${path}/`));
     for (const { workspace, folders } of workspaces) {
-      if (folders.length > 0 && folders.every(includes)) {
+      if (folders.length > 0 && folders.map(comparable).every(includes)) {
         trusted.add(workspace);
       }
     }

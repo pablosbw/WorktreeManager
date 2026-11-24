@@ -49,14 +49,22 @@ struct Snapshot {
     workspaces: Vec<Workspace>,
 }
 
+/// Paths as VS Code names them on the server ([`profile::server_path`]), like trusted paths.
 #[derive(Serialize)]
 pub(super) struct Workspace {
-    workspace: std::path::PathBuf,
-    folders: Vec<std::path::PathBuf>,
+    workspace: String,
+    folders: Vec<String>,
+}
+
+fn server_paths(paths: &[std::path::PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| profile::server_path(path))
+        .collect()
 }
 
 fn generated_workspace(root: &Path, value: &str) -> bool {
-    let path = Path::new(value);
+    let path = profile::local_path(value);
     path.file_name()
         .is_some_and(|name| name == "task.code-workspace")
         && path
@@ -71,18 +79,20 @@ pub(super) fn active_workspaces(app: &AppHandle, root: &Path) -> Vec<Workspace> 
         .open_slots()
         .into_iter()
         .map(|slot| Workspace {
-            workspace: root
-                .join("sessions")
-                .join(profile::key(&slot.info().task_id))
-                .join("task.code-workspace"),
-            folders: slot.request.folders.clone(),
+            workspace: profile::server_path(
+                &root
+                    .join("sessions")
+                    .join(profile::key(&slot.info().task_id))
+                    .join("task.code-workspace"),
+            ),
+            folders: server_paths(&slot.request.folders),
         })
         .collect()
 }
 
 fn validate_paths(paths: &BTreeSet<String>) -> Result<(), String> {
     for value in paths {
-        let path = Path::new(value);
+        let path = profile::local_path(value);
         if !path.is_absolute()
             || value.contains('\0')
             || path
@@ -172,8 +182,8 @@ impl Bridge {
             "origin": self.origin.origin().ascii_serialization(),
             "endpoint": BRIDGE_PATH,
             "token": self.token,
-            "workspace": workspace,
-            "folders": folders,
+            "workspace": profile::server_path(workspace),
+            "folders": server_paths(folders),
         });
         format!("({})({config});", include_str!("trust.js"))
     }
