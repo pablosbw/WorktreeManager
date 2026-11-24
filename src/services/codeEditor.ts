@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { TaskSurface } from "../types";
+import { loadPreference } from "./preferences";
 
 export interface EditorRuntime {
   installed: boolean;
@@ -29,8 +30,11 @@ export interface EditorInstallProgress {
   logs: string[];
 }
 export const editorInstallStatus = () => invoke<EditorInstallProgress>("vscode_install_status");
-export const editorOpen = (taskId: string, workspaceId: string, folders: string[]) =>
-  invoke<EditorSession>("vscode_open", { taskId, workspaceId, folders });
+/** Opens a task's editor; a workspace's server installs the default extensions when it starts. */
+export const editorOpen = async (taskId: string, workspaceId: string, folders: string[]) => {
+  const extensions = await loadPreference("editorExtensions").catch(() => []);
+  return invoke<EditorSession>("vscode_open", { taskId, workspaceId, folders, extensions });
+};
 export const editorClose = (taskId: string) => invoke<void>("vscode_close", { taskId });
 export const editorList = () => invoke<EditorSession[]>("vscode_list");
 export const onEditorSession = (callback: (session: EditorSession) => void) =>

@@ -341,7 +341,7 @@ impl Installation {
     }
 }
 
-fn run_checked(
+pub(super) fn run_checked(
     command: &mut Command,
     log: &Path,
     timeout: Duration,

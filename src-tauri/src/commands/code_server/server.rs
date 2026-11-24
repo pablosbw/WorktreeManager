@@ -1,10 +1,10 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::{adapter, orphan, profile, runtime};
+use super::{adapter, extensions, orphan, profile, runtime};
 use crate::commands::embedded::{loopback_client, poll_until_ready, ServerProcess};
 
 #[derive(Clone)]
@@ -20,10 +20,11 @@ pub struct Server {
     directory: PathBuf,
     pub process: ServerProcess,
     startup: Mutex<Option<Connection>>,
+    extensions: Arc<extensions::Defaults>,
 }
 
 impl Server {
-    pub fn new(root: &Path, workspace_id: &str) -> Self {
+    pub fn new(root: &Path, workspace_id: &str, extensions: Arc<extensions::Defaults>) -> Self {
         let directory = root.join("workspaces").join(profile::key(workspace_id));
         Self {
             workspace_id: workspace_id.into(),
@@ -31,6 +32,7 @@ impl Server {
             directory,
             process: ServerProcess::default(),
             startup: Mutex::new(None),
+            extensions,
         }
     }
 
@@ -63,6 +65,8 @@ impl Server {
     fn start(&self, root: &Path) -> Result<Connection, String> {
         let binary = adapter::prepare(root)?;
         let profile = profile::prepare(root, &self.workspace_id)?;
+        let data = profile.directory.join("data");
+        self.extensions.prepare(&binary, root, &data);
         let log = profile.directory.join("server.log");
         let output = File::create(&log).map_err(|error| error.to_string())?;
         let mut command = runtime::command(&binary);

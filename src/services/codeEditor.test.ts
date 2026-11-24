@@ -1,10 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
-import { EditorPresentationController, type EditorPresentation } from "./codeEditor";
+import { invoke } from "@tauri-apps/api/core";
+import { loadPreference } from "./preferences";
+import { EditorPresentationController, editorOpen, type EditorPresentation } from "./codeEditor";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+vi.mock("./preferences", () => ({ loadPreference: vi.fn() }));
 
 const bounds = { x: 40, y: 80, width: 800, height: 600 };
+
+describe("opening the editor", () => {
+  it("sends the default extensions, or none when they cannot be read", async () => {
+    vi.mocked(loadPreference).mockResolvedValueOnce(["golang.go"]);
+    await editorOpen("a", "workspace", ["/a"]);
+    expect(invoke).toHaveBeenLastCalledWith("vscode_open", {
+      taskId: "a",
+      workspaceId: "workspace",
+      folders: ["/a"],
+      extensions: ["golang.go"],
+    });
+    vi.mocked(loadPreference).mockRejectedValueOnce(new Error("store unavailable"));
+    await editorOpen("a", "workspace", ["/a"]);
+    expect(invoke).toHaveBeenLastCalledWith(
+      "vscode_open",
+      expect.objectContaining({ extensions: [] })
+    );
+  });
+});
 
 describe("editor presentation", () => {
   it("ignores late cleanup and resizing from a previous task", () => {

@@ -2,6 +2,7 @@
 //! has its own editor session, workspace file and view.
 
 mod adapter;
+mod extensions;
 mod orphan;
 mod profile;
 pub mod runtime;
@@ -27,6 +28,7 @@ pub struct CodeServer {
     servers: Mutex<HashMap<String, Arc<server::Server>>>,
     installation: tokio::sync::Mutex<()>,
     installer: Arc<runtime::Installation>,
+    extensions: Arc<extensions::Defaults>,
 }
 
 #[derive(PartialEq)]
@@ -90,7 +92,13 @@ impl Adapter for CodeServer {
             return Err("The editor requires a workspace".into());
         }
         let mut servers = self.servers.lock().unwrap();
-        let new_server = || Arc::new(server::Server::new(&request.root, &request.workspace_id));
+        let new_server = || {
+            Arc::new(server::Server::new(
+                &request.root,
+                &request.workspace_id,
+                self.extensions.clone(),
+            ))
+        };
         let server = servers
             .entry(request.workspace_id.clone())
             .or_insert_with(new_server);
@@ -142,6 +150,7 @@ impl Adapter for CodeServer {
 
     fn shutdown(&self) {
         self.installer.cancel();
+        self.extensions.installer.cancel();
         for (_, server) in self.servers.lock().unwrap().drain() {
             server.stop();
         }
@@ -198,8 +207,14 @@ pub async fn vscode_open(
     task_id: String,
     workspace_id: String,
     folders: Vec<String>,
+    extensions: Option<Vec<String>>,
 ) -> Result<SessionInfo, String> {
     let editor = &surfaces.editor;
+    // Installed when a workspace's server next starts; see `extensions`.
+    editor
+        .adapter()
+        .extensions
+        .set(extensions.unwrap_or_default())?;
     let installation = editor
         .adapter()
         .installation
@@ -389,6 +404,7 @@ pub(crate) mod native {
                 "task".into(),
                 "workspace".into(),
                 folders.clone(),
+                None,
             ))
         };
         let opened = open().unwrap();

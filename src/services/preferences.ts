@@ -43,6 +43,22 @@ export interface Preferences {
   automationsDir: string | null;
   /** Read and archived automation Inbox entries, by key. */
   automationInbox: InboxMarks;
+  /** Open VSX extension IDs installed into the embedded editor when it starts. */
+  editorExtensions: string[];
+}
+
+/** `publisher.name`; the editor refuses anything else, since its installer also takes paths. */
+export const EXTENSION_ID = /^[A-Za-z0-9][\w-]*\.[A-Za-z0-9][\w-]*$/;
+
+/** Valid extension IDs, trimmed, without duplicates (compared without case, like VS Code). */
+export function extensionIds(values: unknown[]): string[] {
+  const seen = new Set<string>();
+  return values.flatMap((value) => {
+    const id = typeof value === "string" ? value.trim() : "";
+    if (!EXTENSION_ID.test(id) || seen.has(id.toLowerCase())) return [];
+    seen.add(id.toLowerCase());
+    return [id];
+  });
 }
 
 export type PersistedValues = Omit<AppState, "shortcutOverrides"> &
@@ -124,6 +140,7 @@ export const normalizers: { [K in keyof PersistedValues]: (raw: unknown) => Pers
       Array.isArray(list) ? list.filter((key): key is string => typeof key === "string") : [];
     return { read: keys(value.read), archived: keys(value.archived) };
   },
+  editorExtensions: (raw) => (Array.isArray(raw) ? extensionIds(raw) : []),
 };
 
 export async function loadPreference<K extends keyof PersistedValues>(

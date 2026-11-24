@@ -39,6 +39,7 @@ const values: Preferences = {
   navigationHistory: [{ kind: "task", taskId: "t1", workspaceId: "w1", at: "2026-10-28" }],
   automationsDir: "/skills/automations",
   automationInbox: { read: ["run:demo:1"], archived: ["question:demo:routine:triage:abc"] },
+  editorExtensions: ["rust-lang.rust-analyzer", "esbenp.prettier-vscode"],
 };
 
 beforeEach(() => {
@@ -127,6 +128,24 @@ describe("normalization", () => {
     expect(normalizers.navigationHistory([null, {}, ...values.navigationHistory])).toEqual(
       values.navigationHistory
     );
+  });
+
+  it("keeps only distinct marketplace IDs as default editor extensions", async () => {
+    const { normalizers } = await import("./preferences");
+    expect(normalizers.editorExtensions(undefined)).toEqual([]);
+    expect(normalizers.editorExtensions("golang.go")).toEqual([]);
+    expect(
+      normalizers.editorExtensions([
+        " golang.Go ",
+        "GOLANG.go",
+        "ms_python.python",
+        42,
+        "noperiod",
+        "a.b.c",
+        "../evil.vsix",
+        "-flag.name",
+      ])
+    ).toEqual(["golang.Go", "ms_python.python"]);
   });
 
   it("falls back to the default automations directory unless given an absolute path", async () => {
