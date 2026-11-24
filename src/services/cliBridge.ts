@@ -5,7 +5,7 @@ import { joinPath } from "../platform";
 import { Workspace, WorkspaceRepo, GitStatus } from "../types";
 import { normalizeRepoScripts } from "../utils";
 import { isCatalogAgent } from "./agents";
-import { MarkedIssueInput } from "./linear";
+import { IssueCreateInput, MarkedIssueInput, ProjectCreateInput } from "./linear";
 import {
   Operations,
   OperationError,
@@ -266,6 +266,82 @@ function markedIssueInput(params: Record<string, unknown>): MarkedIssueInput {
   };
 }
 
+/** Markdown kept as written; blank means none. */
+function markdown(value: unknown, field: string): string | undefined {
+  if (typeof value !== "string")
+    throw new OperationError("invalid_params", `${field} must be a string.`);
+  return value.trim() ? value : undefined;
+}
+
+function names(value: unknown, field: string): string[] {
+  if (!Array.isArray(value))
+    throw new OperationError("invalid_params", `${field} must be a list of names.`);
+  return [...new Set(value.map(text))];
+}
+
+function issueCreateInput(value: unknown): IssueCreateInput {
+  const input = object(value, [
+    "team",
+    "title",
+    "description",
+    "project",
+    "milestone",
+    "assignee",
+    "labels",
+    "priority",
+    "state",
+  ]);
+  const result: IssueCreateInput = { team: text(input.team), title: text(input.title) };
+  if (input.description !== undefined)
+    result.description = markdown(input.description, "description");
+  for (const field of ["project", "milestone", "state"] as const)
+    if (input[field] !== undefined) result[field] = text(input[field]);
+  if (input.assignee !== undefined)
+    result.assignee = input.assignee === null ? null : text(input.assignee);
+  if (input.labels !== undefined) result.labels = names(input.labels, "labels");
+  if (input.priority !== undefined) {
+    const priority = input.priority;
+    if (typeof priority !== "number" || !Number.isInteger(priority) || priority < 0 || priority > 4)
+      throw new OperationError(
+        "invalid_params",
+        "priority must be 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)."
+      );
+    result.priority = priority;
+  }
+  if (result.milestone && !result.project)
+    throw new OperationError("invalid_params", "milestone needs project.");
+  return result;
+}
+
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function projectCreateInput(value: unknown): ProjectCreateInput {
+  const input = object(value, [
+    "name",
+    "teams",
+    "description",
+    "content",
+    "lead",
+    "status",
+    "startDate",
+    "targetDate",
+  ]);
+  const result: ProjectCreateInput = { name: text(input.name), teams: names(input.teams, "teams") };
+  if (!result.teams.length)
+    throw new OperationError("invalid_params", "teams needs at least one team.");
+  for (const field of ["description", "content"] as const)
+    if (input[field] !== undefined) result[field] = markdown(input[field], field);
+  for (const field of ["lead", "status"] as const)
+    if (input[field] !== undefined) result[field] = text(input[field]);
+  for (const field of ["startDate", "targetDate"] as const) {
+    if (input[field] === undefined) continue;
+    if (typeof input[field] !== "string" || !DATE.test(input[field]))
+      throw new OperationError("invalid_params", `${field} must be a YYYY-MM-DD date.`);
+    result[field] = input[field];
+  }
+  return result;
+}
+
 const DEFAULT_RUNS_PAGE = 20;
 
 function pageLimit(value: unknown): number {
@@ -398,6 +474,11 @@ export async function dispatchCliBridge(
       ],
       "linear.issue-state": ["workspaceId", "marker", "state"],
       "task.log-append": ["id", "entry", "key"],
+      "linear.teams": ["workspaceId"],
+      "linear.projects": ["workspaceId", "team"],
+      "linear.project-get": ["workspaceId", "project"],
+      "linear.project-create": ["workspaceId", "input"],
+      "linear.issue-create": ["workspaceId", "input"],
     };
     if (
       !Object.hasOwn(allowed, request.method) ||
@@ -609,6 +690,30 @@ export async function dispatchCliBridge(
           text(params.workspaceId),
           text(params.marker),
           text(params.state)
+        );
+        break;
+      case "linear.teams":
+        result = await operations.linearTeams(text(params.workspaceId));
+        break;
+      case "linear.projects":
+        result = await operations.linearProjects(
+          text(params.workspaceId),
+          optionalText(params.team)
+        );
+        break;
+      case "linear.project-get":
+        result = await operations.linearProject(text(params.workspaceId), text(params.project));
+        break;
+      case "linear.project-create":
+        result = await operations.createLinearProject(
+          text(params.workspaceId),
+          projectCreateInput(params.input)
+        );
+        break;
+      case "linear.issue-create":
+        result = await operations.createLinearIssue(
+          text(params.workspaceId),
+          issueCreateInput(params.input)
         );
         break;
       case "task.log-append":

@@ -152,6 +152,95 @@ interface ProjectNode {
 
 type NodesResponse = Record<string, { nodes: { id: string }[] }>;
 
+/** An issue the CLI creates; every name must resolve, so nothing is silently dropped. */
+export interface IssueCreateInput {
+  /** Team key, id or name. */
+  team: string;
+  title: string;
+  description?: string;
+  /** Project name, slug id, id or URL. */
+  project?: string;
+  /** Milestone name in the project. */
+  milestone?: string;
+  /** `me` (the default), a user's email or display name, or null to leave it unassigned. */
+  assignee?: string | null;
+  labels?: string[];
+  /** 0 none, 1 urgent, 2 high, 3 medium, 4 low. */
+  priority?: number;
+  /** Workflow state name in the team; Linear picks the team's default without it. */
+  state?: string;
+}
+
+export interface CreatedIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  /** The branch Linear suggests; `wtm task create` takes it with `linearIssue`. */
+  branchName: string;
+  project: { id: string; name: string } | null;
+  state: { name: string; type: string } | null;
+}
+
+export interface ProjectCreateInput {
+  name: string;
+  /** Team keys, ids or names; at least one. */
+  teams: string[];
+  /** Short summary. */
+  description?: string;
+  /** Markdown body. */
+  content?: string;
+  /** `me`, or a user's email or display name. */
+  lead?: string;
+  /** Project status name, such as Backlog or Planned. */
+  status?: string;
+  /** YYYY-MM-DD. */
+  startDate?: string;
+  targetDate?: string;
+}
+
+export interface LinearProjectSummary {
+  id: string;
+  name: string;
+  slugId: string;
+  url: string;
+  status: { name: string; type: string } | null;
+  lead: { name: string } | null;
+  teams: string[];
+  startDate: string | null;
+  targetDate: string | null;
+  progress: number;
+  updatedAt: string;
+}
+
+export interface LinearProjectDetail extends LinearProjectSummary {
+  description: string;
+  content: string | null;
+  milestones: { id: string; name: string; targetDate: string | null }[];
+}
+
+interface GqlProjectNode extends Omit<LinearProjectSummary, "teams"> {
+  teams: { nodes: { key: string }[] };
+}
+
+interface GqlProjectDetailNode extends GqlProjectNode {
+  description: string;
+  content: string | null;
+  projectMilestones: { nodes: { id: string; name: string; targetDate: string | null }[] };
+}
+
+interface ProjectsResponse {
+  projects: {
+    nodes: GqlProjectNode[];
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+}
+
+interface TeamsContextResponse {
+  viewer: { id: string };
+  teams: { nodes: { id: string; key: string; name: string }[] };
+}
+
 // ---- GraphQL queries ----
 
 const MARKED_ISSUE_QUERY = `
@@ -189,6 +278,53 @@ const USER_QUERY = `
     users(filter: { or: [{ email: { eq: $user } }, { displayName: { eqIgnoreCase: $user } }] }, first: 1) {
       nodes { id }
     }
+  }
+`;
+
+const TEAMS_CONTEXT_QUERY = `
+  query TeamsContext {
+    viewer { id }
+    teams(first: 250) { nodes { id key name } }
+  }
+`;
+
+const TEAM_STATES_QUERY = `
+  query TeamStates($team: String!) {
+    team(id: $team) { states(first: 250) { nodes { id name type } } }
+  }
+`;
+
+const PROJECT_STATUSES_QUERY = `
+  query ProjectStatuses {
+    projectStatuses(first: 250) { nodes { id name } }
+  }
+`;
+
+const PROJECT_SUMMARY_FIELDS = `
+  id name slugId url progress updatedAt startDate targetDate
+  status { name type }
+  lead { name }
+  teams(first: 25) { nodes { key } }
+`;
+
+const PROJECT_DETAIL_FIELDS = `
+  ${PROJECT_SUMMARY_FIELDS}
+  description content
+  projectMilestones(first: 250) { nodes { id name targetDate } }
+`;
+
+const PROJECTS_QUERY = `
+  query Projects($filter: ProjectFilter, $after: String) {
+    projects(filter: $filter, first: 50, after: $after, orderBy: updatedAt) {
+      nodes { ${PROJECT_SUMMARY_FIELDS} }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+`;
+
+const PROJECT_DETAIL_QUERY = `
+  query ProjectDetail($filter: ProjectFilter) {
+    projects(filter: $filter, first: 1) { nodes { ${PROJECT_DETAIL_FIELDS} } }
   }
 `;
 
@@ -259,6 +395,61 @@ const ISSUES_BATCH_QUERY = `
 `;
 
 // ---- Pure helpers ----
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Finds a project by id, slug id, name or URL (`…/project/<name>-<slugId>/…`). */
+export function projectFilter(ref: string): Record<string, unknown> {
+  const wanted = ref.trim();
+  if (UUID.test(wanted)) return { id: { eq: wanted } };
+  const slug = wanted.match(/\/project\/([^/?#]+)/)?.[1];
+  if (slug) return { slugId: { eq: slug.split("-").pop() } };
+  return { or: [{ name: { eqIgnoreCase: wanted } }, { slugId: { eq: wanted } }] };
+}
+
+function mapProject(node: GqlProjectNode): LinearProjectSummary {
+  return {
+    id: node.id,
+    name: node.name,
+    slugId: node.slugId,
+    url: node.url,
+    status: node.status ?? null,
+    lead: node.lead ?? null,
+    teams: node.teams.nodes.map((team) => team.key),
+    startDate: node.startDate ?? null,
+    targetDate: node.targetDate ?? null,
+    progress: node.progress,
+    updatedAt: node.updatedAt,
+  };
+}
+
+function mapProjectDetail(node: GqlProjectDetailNode): LinearProjectDetail {
+  return {
+    ...mapProject(node),
+    description: node.description,
+    content: node.content ?? null,
+    milestones: node.projectMilestones.nodes.map(({ id, name, targetDate }) => ({
+      id,
+      name,
+      targetDate: targetDate ?? null,
+    })),
+  };
+}
+
+function findTeam<T extends { id: string; key: string; name: string }>(teams: T[], wanted: string) {
+  const name = wanted.trim().toLowerCase();
+  const team = teams.find((candidate) =>
+    [candidate.id, candidate.key.toLowerCase(), candidate.name.toLowerCase()].includes(name)
+  );
+  if (!team) throw new Error(`Linear team ${wanted} not found`);
+  return team;
+}
+
+function findNamed<T extends { name: string }>(items: T[], wanted: string, missing: string): T {
+  const found = items.find((item) => item.name.toLowerCase() === wanted.trim().toLowerCase());
+  if (!found) throw new Error(missing);
+  return found;
+}
 
 function mapIssueNode(node: GqlIssueNode): LinearIssue {
   return {
@@ -460,6 +651,169 @@ export class LinearService {
   async listTeams(): Promise<LinearTeam[]> {
     const teams = await this.client.teams();
     return teams.nodes.map((team) => ({ id: team.id, key: team.key, name: team.name }));
+  }
+
+  async listProjects(team?: string): Promise<LinearProjectSummary[]> {
+    const filter = team
+      ? {
+          accessibleTeams: {
+            some: { id: { eq: findTeam((await this.teamsContext()).teams.nodes, team).id } },
+          },
+        }
+      : undefined;
+    const projects: LinearProjectSummary[] = [];
+    let after: string | null = null;
+    do {
+      const res = await this.gql.rawRequest<ProjectsResponse, Record<string, unknown>>(
+        PROJECTS_QUERY,
+        { filter, after }
+      );
+      const page: ProjectsResponse["projects"] = res.data!.projects;
+      projects.push(...page.nodes.map(mapProject));
+      after = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+    } while (after);
+    return projects;
+  }
+
+  async getProject(ref: string): Promise<LinearProjectDetail> {
+    return mapProjectDetail(await this.projectDetail(ref));
+  }
+
+  private async projectDetail(ref: string): Promise<GqlProjectDetailNode> {
+    const res = await this.gql.rawRequest<
+      { projects: { nodes: GqlProjectDetailNode[] } },
+      Record<string, unknown>
+    >(PROJECT_DETAIL_QUERY, { filter: projectFilter(ref) });
+    const project = res.data!.projects.nodes[0];
+    if (!project) throw new Error(`Linear project ${ref} not found`);
+    return project;
+  }
+
+  private async teamsContext(): Promise<TeamsContextResponse> {
+    const res = await this.gql.rawRequest<TeamsContextResponse, Record<string, unknown>>(
+      TEAMS_CONTEXT_QUERY,
+      {}
+    );
+    return res.data!;
+  }
+
+  private userId(user: string, viewerId: string): Promise<string> {
+    return user === "me"
+      ? Promise.resolve(viewerId)
+      : this.lookup(USER_QUERY, { user }, `Linear user ${user} not found`);
+  }
+
+  private async teamState(team: { id: string; key: string }, name: string) {
+    const res = await this.gql.rawRequest<
+      { team: { states: { nodes: { id: string; name: string }[] } } },
+      Record<string, unknown>
+    >(TEAM_STATES_QUERY, { team: team.id });
+    return findNamed(
+      res.data!.team.states.nodes,
+      name,
+      `Linear state ${name} not found in team ${team.key}`
+    );
+  }
+
+  private async projectStatusId(name: string): Promise<string> {
+    const res = await this.gql.rawRequest<
+      { projectStatuses: { nodes: { id: string; name: string }[] } },
+      Record<string, unknown>
+    >(PROJECT_STATUSES_QUERY, {});
+    return findNamed(
+      res.data!.projectStatuses.nodes,
+      name,
+      `Linear project status ${name} not found`
+    ).id;
+  }
+
+  /** Resolves every name before creating, so a typo fails instead of creating a partial issue. */
+  async createNamedIssue(input: IssueCreateInput): Promise<CreatedIssue> {
+    if (input.milestone && !input.project) throw new Error("A Linear milestone needs a project");
+    const labels = input.labels ?? [];
+    const { viewer, teams, issueLabels } = await this.upsertContext(labels);
+    const team = findTeam(teams.nodes, input.team);
+    const labelIds = labels.map((name) => {
+      const label = issueLabels.nodes.find(
+        (candidate) => candidate.name === name && (!candidate.team || candidate.team.id === team.id)
+      );
+      if (!label) throw new Error(`Linear label ${name} not found in team ${team.key}`);
+      return label.id;
+    });
+    const [project, assigneeId, state] = await Promise.all([
+      input.project ? this.projectDetail(input.project) : undefined,
+      input.assignee === null ? undefined : this.userId(input.assignee ?? "me", viewer.id),
+      input.state ? this.teamState(team, input.state) : undefined,
+    ]);
+    const milestone =
+      project && input.milestone
+        ? findNamed(
+            project.projectMilestones.nodes,
+            input.milestone,
+            `Linear milestone ${input.milestone} not found in project ${project.name}`
+          )
+        : undefined;
+    const res = await this.gql.rawRequest<
+      { issueCreate: { success: boolean; issue: CreatedIssue | null } },
+      Record<string, unknown>
+    >(
+      `mutation CreateNamedIssue($input: IssueCreateInput!) {
+        issueCreate(input: $input) {
+          success
+          issue { id identifier title url branchName project { id name } state { name type } }
+        }
+      }`,
+      {
+        input: {
+          teamId: team.id,
+          title: input.title,
+          ...(input.description ? { description: input.description } : {}),
+          ...(assigneeId ? { assigneeId } : {}),
+          ...(labelIds.length ? { labelIds } : {}),
+          ...(project ? { projectId: project.id } : {}),
+          ...(milestone ? { projectMilestoneId: milestone.id } : {}),
+          ...(input.priority !== undefined ? { priority: input.priority } : {}),
+          ...(state ? { stateId: state.id } : {}),
+        },
+      }
+    );
+    const payload = res.data?.issueCreate;
+    if (!payload?.success || !payload.issue) throw new Error("Linear rejected the issue creation");
+    return { ...payload.issue, project: payload.issue.project ?? null };
+  }
+
+  /** Resolves the teams, lead and status before creating, like `createNamedIssue`. */
+  async createProject(input: ProjectCreateInput): Promise<LinearProjectDetail> {
+    const { viewer, teams } = await this.teamsContext();
+    const teamIds = [...new Set(input.teams.map((team) => findTeam(teams.nodes, team).id))];
+    const [leadId, statusId] = await Promise.all([
+      input.lead ? this.userId(input.lead, viewer.id) : undefined,
+      input.status ? this.projectStatusId(input.status) : undefined,
+    ]);
+    const res = await this.gql.rawRequest<
+      { projectCreate: { success: boolean; project: GqlProjectDetailNode | null } },
+      Record<string, unknown>
+    >(
+      `mutation CreateProject($input: ProjectCreateInput!) {
+        projectCreate(input: $input) { success project { ${PROJECT_DETAIL_FIELDS} } }
+      }`,
+      {
+        input: {
+          name: input.name,
+          teamIds,
+          ...(input.description ? { description: input.description } : {}),
+          ...(input.content ? { content: input.content } : {}),
+          ...(leadId ? { leadId } : {}),
+          ...(statusId ? { statusId } : {}),
+          ...(input.startDate ? { startDate: input.startDate } : {}),
+          ...(input.targetDate ? { targetDate: input.targetDate } : {}),
+        },
+      }
+    );
+    const payload = res.data?.projectCreate;
+    if (!payload?.success || !payload.project)
+      throw new Error("Linear rejected the project creation");
+    return mapProjectDetail(payload.project);
   }
 
   async createIssue(input: {

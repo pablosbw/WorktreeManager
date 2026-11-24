@@ -23,7 +23,7 @@ import {
 } from "../types";
 import { isAbsolutePath, joinPath } from "../platform";
 import { compareTaskPins } from "../utils";
-import { LinearService, MarkedIssueInput } from "./linear";
+import { IssueCreateInput, LinearService, MarkedIssueInput, ProjectCreateInput } from "./linear";
 import { taskLinearStore } from "./taskLinear";
 import { emitAppEvent, taskAppEvent } from "./automationEvents";
 import { persist } from "./store";
@@ -1051,6 +1051,26 @@ export class Operations {
 
   moveMarkedIssue(workspaceId: string, marker: string, state: string) {
     return linearFailure(this.linear(workspaceId).moveMarkedIssue(marker, state));
+  }
+
+  linearTeams(workspaceId: string) {
+    return linearFailure(this.linear(workspaceId).listTeams());
+  }
+
+  linearProjects(workspaceId: string, team?: string) {
+    return linearFailure(this.linear(workspaceId).listProjects(team));
+  }
+
+  linearProject(workspaceId: string, project: string) {
+    return linearFailure(this.linear(workspaceId).getProject(project));
+  }
+
+  createLinearProject(workspaceId: string, input: ProjectCreateInput) {
+    return linearFailure(this.linear(workspaceId).createProject(input));
+  }
+
+  createLinearIssue(workspaceId: string, input: IssueCreateInput) {
+    return linearFailure(this.linear(workspaceId).createNamedIssue(input));
   }
 
   /**

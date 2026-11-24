@@ -34,9 +34,20 @@ wtm automation list                      # automations with their definition, er
 wtm automation get <name>
 wtm automation runs <name> [--before <run_id>] [--limit <n>]   # newest first; page with next_before
 wtm automation status <name> <run_id>    # one run: status, items and step attempts
+wtm linear teams --workspace <id>        # Linear commands use the workspace's Linear key
+wtm linear projects --workspace <id> [--team <key>]
+wtm linear project-get <name|slug|id|url> --workspace <id>   # with description, content and milestones
+wtm linear project-create --workspace <id> --input project.json
+wtm linear issue-create --workspace <id> --input issue.json
 ```
 
 Task input: `{"workspaceId":"…","branchName":"…","repoIds":["…"],"linearIssue":{"id":"<uuid>","identifier":"WOR-80","title":"…"}}`. Omit `repoIds` to include every repository. With `linearIssue`, pass Linear's exact `branchName`.
+
+Issue input: `{"team":"ENG","title":"…","description":"<markdown>","project":"…","milestone":"…","state":"Todo","labels":["Bug"],"priority":2,"assignee":"me"}`. Only `team` and `title` are required; `assignee` defaults to `me` and `null` leaves it unassigned. The result's `id`, `identifier`, `title` and `branchName` are what `task create` takes.
+
+Project input: `{"name":"…","teams":["ENG"],"description":"<summary>","content":"<markdown>","lead":"me","status":"Planned","startDate":"2026-01-05","targetDate":"2026-03-31"}`. Only `name` and `teams` are required.
+
+Every team, project, label, state, user and status name must resolve, or nothing is created and the error names what did not.
 
 ## Find the current task
 
@@ -44,7 +55,7 @@ Match `git rev-parse --show-toplevel` against `members[].path` in `wtm task list
 
 ## Safety rules
 
-- Create, link and delete only when the user asked for it or agreed to a proposal. Reads are always fine.
+- Create, link and delete only when the user asked for it or agreed to a proposal. This includes Linear issues and projects. Reads are always fine.
 - Never retry a mutation automatically after a disconnect or timeout: an accepted operation can still finish. Re-read `wtm task list` first.
 - `--force` discards uncommitted files; use it only when the user explicitly wants to lose local changes.
 - Deleting keeps Git branches and archives notes. Report `warnings` to the user; they are not failures.

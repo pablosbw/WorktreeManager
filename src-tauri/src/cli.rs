@@ -17,6 +17,7 @@ const HELP: &str = r#"wtm — control the running WorktreeManager app (JSON outp
 Usage: wtm                         Open the app
        wtm [--local] <workspace|task> <operation> [id] [options]
        wtm [--local] automation <operation> [name] [run_id] [options]
+       wtm [--local] linear <operation> [project] --workspace <id> [options]
        wtm [--local] agent event <working|waiting|done> --agent <claude|codex>
        wtm [--local] lease <operation> [options] [-- <command>]
        worktree-manager --cli [--local] ...
@@ -93,6 +94,16 @@ automation retry <run_id> [--item <id>] [--definition <current|original>] [--fro
                                      its run started with. An item blocked by an
                                      exhausted budget gets a fresh count of it.
                                      Publish effects already done are not repeated.
+linear teams --workspace <id>
+linear projects --workspace <id> [--team <key>]
+                                     Projects, most recently updated first.
+linear project-get <project> --workspace <id>
+                                     By name, slug id, id or Linear URL; with its
+                                     description, content and milestones.
+linear project-create --workspace <id> --input <file|->
+linear issue-create --workspace <id> --input <file|->
+                                     Linear commands use the workspace's Linear key.
+                                     Every name must resolve or nothing is created.
 agent event <state> --agent <name>   Agent hook: reads the hook JSON from stdin,
                                      prints nothing and always exits 0.
 lease run --pool <name> [--holder <key>] [--values <v,…>] -- <command> [args]
@@ -121,6 +132,15 @@ Repositories declare setup and teardown scripts in .worktreemanager.toml (or
 Conductor, Superset or Cursor config); without one the app detects Doppler, Node
 and Python. Setup scripts run automatically; repository teardown needs app approval.
 
+Issue input: {"team":"ENG","title":"Fix login","description":"Markdown"}
+Optional: project (name, slug id, id or URL), milestone (needs project), state
+(team workflow state name), labels (names), priority (0 none, 1 urgent … 4 low),
+assignee ("me" by default, an email or display name, or null for nobody).
+Prints identifier, url and branchName; pass them to task create as linearIssue.
+Project input: {"name":"Checkout v2","teams":["ENG"]}
+Optional: description (summary), content (Markdown), lead ("me", email or name),
+status (project status name, e.g. Planned), startDate and targetDate (YYYY-MM-DD).
+
 Examples:
   wtm
   wtm workspace list
@@ -130,6 +150,8 @@ Examples:
   wtm task get TASK_ID --git
   wtm task delete TASK_ID --delete-worktrees
   wtm automation runs babysitter --limit 5
+  wtm linear projects --workspace WORKSPACE_ID --team ENG
+  wtm linear issue-create --workspace WORKSPACE_ID --input issue.json
 
 --local targets isolated development; default targets the installed/shared app.
 --force only works with --delete-worktrees and discards uncommitted files.
@@ -165,6 +187,12 @@ fn parse(args: &[String]) -> Result<Arguments, String> {
                 params.insert(
                     "workspaceId".into(),
                     json!(args.next().ok_or("--workspace requires an ID")?),
+                );
+            }
+            "--team" if !params.contains_key("team") => {
+                params.insert(
+                    "team".into(),
+                    json!(args.next().ok_or("--team requires a team key")?),
                 );
             }
             "--issue" if !params.contains_key("issue") => {
@@ -313,6 +341,10 @@ fn parse(args: &[String]) -> Result<Arguments, String> {
         "automation.take-over" => (&["runId"], false, &["item"]),
         "automation.hand-back" => (&["runId"], false, &["item", "note"]),
         "automation.retry" => (&["runId"], false, &["item", "definition", "from"]),
+        "linear.teams" => (&[], false, &["workspaceId"]),
+        "linear.projects" => (&[], false, &["workspaceId", "team"]),
+        "linear.project-get" => (&["project"], false, &["workspaceId"]),
+        "linear.project-create" | "linear.issue-create" => (&[], true, &["workspaceId"]),
         _ => return Err("Unknown operation; see --help".into()),
     };
     if words.len() != 2 + positional.len()
@@ -366,6 +398,9 @@ fn parse(args: &[String]) -> Result<Arguments, String> {
         if params.contains_key("schema") && !params.contains_key("wait") {
             return Err("--schema requires --wait".into());
         }
+    }
+    if method.starts_with("linear.") && !params.contains_key("workspaceId") {
+        return Err("Provide --workspace with the workspace whose Linear key to use".into());
     }
     if method == "task.link-issue" && !params.contains_key("issue") {
         return Err("Provide --issue with a Linear issue identifier".into());
@@ -851,6 +886,41 @@ mod tests {
             "task get t1 --issue WOR-123",
             "task link-issue t1 --issue A --issue B",
             "task link-issue t1 --issue A --input -",
+        ] {
+            assert!(parse(&args(invalid)).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn parses_linear_commands_with_the_workspace_and_their_input() {
+        let projects = parse(&args("linear projects --workspace w1 --team ENG")).unwrap();
+        assert_eq!(projects.method, "linear.projects");
+        assert_eq!(
+            Value::Object(projects.params),
+            json!({ "workspaceId": "w1", "team": "ENG" })
+        );
+        let project = parse(&args("--local linear project-get checkout --workspace w1")).unwrap();
+        assert_eq!(
+            Value::Object(project.params),
+            json!({ "workspaceId": "w1", "project": "checkout" })
+        );
+        let issue = parse(&args("linear issue-create --workspace w1 --input -")).unwrap();
+        assert_eq!(issue.method, "linear.issue-create");
+        assert_eq!(issue.input.as_deref(), Some("-"));
+        assert!(parse(&args("linear teams --workspace w1")).is_ok());
+        assert!(parse(&args("linear project-create --workspace w1 --input p.json")).is_ok());
+        assert_eq!(
+            parse(&args("linear teams")).err().as_deref(),
+            Some("Provide --workspace with the workspace whose Linear key to use")
+        );
+        for invalid in [
+            "linear projects --workspace w1 --team",
+            "linear projects --workspace w1 --team A --team B",
+            "linear project-get --workspace w1",
+            "linear issue-create --workspace w1",
+            "linear teams --workspace w1 --team ENG",
+            "linear issue-upsert --workspace w1",
+            "task list --team ENG",
         ] {
             assert!(parse(&args(invalid)).is_err(), "{invalid}");
         }

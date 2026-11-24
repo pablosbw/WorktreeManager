@@ -15,7 +15,7 @@ If the current directory already belongs to a task for this issue (see `wtm` →
 
 Gather the following, propose it in one short message, and wait for agreement:
 
-- **Issue** — fetch it with the user's Linear tooling: `id` (UUID), `identifier`, `title`, `branchName`. Without an issue, ask whether to create one; free-form tasks work but lose the Linear link.
+- **Issue** — fetch it with the user's Linear tooling: `id` (UUID), `identifier`, `title`, `branchName`. Without an issue, ask whether to create one (`wtm linear issue-create`); free-form tasks work but lose the Linear link.
 - **Workspace** — `wtm workspace list`; choose the one whose repositories the change touches. Ask if more than one fits.
 - **Repositories** — only the ones the change needs. A cross-repository change that merges together is one task with several members; changes that ship as separate PRs need separate issues (see `wtm-split-work`).
 

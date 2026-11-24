@@ -1,5 +1,10 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { extractPrsFromAttachments, GqlAttachmentNode, LinearService } from "./linear";
+import {
+  extractPrsFromAttachments,
+  GqlAttachmentNode,
+  LinearService,
+  projectFilter,
+} from "./linear";
 
 describe("extractPrsFromAttachments", () => {
   it("returns an empty array for empty attachments", () => {
@@ -667,5 +672,265 @@ describe("Linear requests", () => {
     );
     const [first, second] = unanswered.mock.calls.map(([, init]) => init.signal);
     expect(first).not.toBe(second);
+  });
+});
+
+describe("issues and projects created by name", () => {
+  const service = (...responses: unknown[]) => {
+    const linear = new LinearService("test-key");
+    const request = vi.fn();
+    for (const data of responses) request.mockResolvedValueOnce({ data });
+    Object.defineProperty(linear, "gql", { value: { rawRequest: request } });
+    return { linear, request };
+  };
+  const context = {
+    viewer: { id: "viewer" },
+    teams: { nodes: [{ id: "team", key: "ENG", name: "Engineering" }] },
+    issueLabels: {
+      nodes: [
+        { id: "other-team-label", name: "Bug", team: { id: "other" } },
+        { id: "label", name: "Bug", team: { id: "team" } },
+      ],
+    },
+  };
+  const projectNode = {
+    id: "project",
+    name: "Checkout",
+    slugId: "abc123",
+    url: "https://linear.app/x/project/checkout-abc123",
+    progress: 0.5,
+    updatedAt: "2026-11-01T00:00:00.000Z",
+    startDate: null,
+    targetDate: "2026-12-31",
+    status: { name: "Planned", type: "planned" },
+    lead: null,
+    teams: { nodes: [{ key: "ENG" }] },
+    description: "Summary",
+    content: null,
+    projectMilestones: { nodes: [{ id: "m1", name: "Beta", targetDate: null }] },
+  };
+  const issue = {
+    id: "new",
+    identifier: "ENG-7",
+    title: "Fix login",
+    url: "u",
+    branchName: "me/eng-7-fix-login",
+    project: null,
+    state: { name: "Todo", type: "unstarted" },
+  };
+  const mutations = (request: ReturnType<typeof vi.fn>, name: string) =>
+    request.mock.calls.filter(([query]) => String(query).includes(name)).length;
+
+  it("creates an issue assigned to the viewer by default", async () => {
+    const { linear, request } = service(context, { issueCreate: { success: true, issue } });
+    await expect(linear.createNamedIssue({ team: "eng", title: "Fix login" })).resolves.toEqual(
+      issue
+    );
+    expect(request.mock.calls[0][1]).toEqual({ labels: [] });
+    expect(request.mock.calls[1][1]).toEqual({
+      input: { teamId: "team", title: "Fix login", assigneeId: "viewer" },
+    });
+  });
+
+  it("resolves every named field of the issue", async () => {
+    const { linear, request } = service(
+      context,
+      { projects: { nodes: [projectNode] } },
+      { users: { nodes: [{ id: "ana" }] } },
+      { team: { states: { nodes: [{ id: "s-todo", name: "Todo" }] } } },
+      { issueCreate: { success: true, issue: { ...issue, project: { id: "project" } } } }
+    );
+    await linear.createNamedIssue({
+      team: "Engineering",
+      title: "Fix login",
+      description: "Steps",
+      project: "https://linear.app/x/project/checkout-abc123/overview",
+      milestone: "beta",
+      assignee: "ana@example.com",
+      labels: ["Bug"],
+      priority: 2,
+      state: "todo",
+    });
+    expect(request.mock.calls[1][1]).toEqual({ filter: { slugId: { eq: "abc123" } } });
+    expect(request.mock.calls[2][1]).toEqual({ user: "ana@example.com" });
+    expect(request.mock.calls[3][1]).toEqual({ team: "team" });
+    expect(request.mock.calls[4][1]).toEqual({
+      input: {
+        teamId: "team",
+        title: "Fix login",
+        description: "Steps",
+        assigneeId: "ana",
+        labelIds: ["label"],
+        projectId: "project",
+        projectMilestoneId: "m1",
+        priority: 2,
+        stateId: "s-todo",
+      },
+    });
+  });
+
+  it("leaves an issue unassigned when the assignee is null", async () => {
+    const { linear, request } = service(context, { issueCreate: { success: true, issue } });
+    await linear.createNamedIssue({ team: "ENG", title: "T", assignee: null, priority: 0 });
+    expect(request.mock.calls[1][1]).toEqual({
+      input: { teamId: "team", title: "T", priority: 0 },
+    });
+  });
+
+  it.each([
+    [{ team: "WEB" }, [], "Linear team WEB not found"],
+    [{ labels: ["Chore"] }, [], "Linear label Chore not found in team ENG"],
+    [{ project: "Nope" }, [{ projects: { nodes: [] } }], "Linear project Nope not found"],
+    [
+      { project: "Checkout", milestone: "GA" },
+      [{ projects: { nodes: [projectNode] } }],
+      "Linear milestone GA not found in project Checkout",
+    ],
+    [{ assignee: "nobody" }, [{ users: { nodes: [] } }], "Linear user nobody not found"],
+    [
+      { state: "Shipped" },
+      [{ team: { states: { nodes: [] } } }],
+      "Linear state Shipped not found in team ENG",
+    ],
+  ])("creates nothing when a name does not resolve: %j", async (fields, responses, error) => {
+    const { linear, request } = service(context, ...responses);
+    await expect(linear.createNamedIssue({ team: "ENG", title: "T", ...fields })).rejects.toThrow(
+      error
+    );
+    expect(mutations(request, "issueCreate")).toBe(0);
+  });
+
+  it("reports an issue creation Linear rejects", async () => {
+    const { linear } = service(context, { issueCreate: { success: false, issue: null } });
+    await expect(linear.createNamedIssue({ team: "ENG", title: "T" })).rejects.toThrow(
+      "Linear rejected the issue creation"
+    );
+  });
+
+  it("refuses a milestone without a project before asking Linear", async () => {
+    const { linear, request } = service();
+    await expect(
+      linear.createNamedIssue({ team: "ENG", title: "T", milestone: "Beta" })
+    ).rejects.toThrow("A Linear milestone needs a project");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("creates a project with its teams, lead and status resolved", async () => {
+    const { linear, request } = service(
+      context,
+      { projectStatuses: { nodes: [{ id: "st", name: "Planned" }] } },
+      { projectCreate: { success: true, project: projectNode } }
+    );
+    const project = await linear.createProject({
+      name: "Checkout",
+      teams: ["ENG", "engineering"],
+      description: "Summary",
+      content: "# Goals",
+      lead: "me",
+      status: "planned",
+      startDate: "2026-12-01",
+      targetDate: "2026-12-31",
+    });
+    expect(project).toMatchObject({
+      id: "project",
+      teams: ["ENG"],
+      milestones: [{ id: "m1", name: "Beta", targetDate: null }],
+    });
+    expect(request.mock.calls[2][1]).toEqual({
+      input: {
+        name: "Checkout",
+        teamIds: ["team"],
+        description: "Summary",
+        content: "# Goals",
+        leadId: "viewer",
+        statusId: "st",
+        startDate: "2026-12-01",
+        targetDate: "2026-12-31",
+      },
+    });
+  });
+
+  it("creates a project with only its name and teams", async () => {
+    const { linear, request } = service(context, {
+      projectCreate: { success: true, project: projectNode },
+    });
+    await linear.createProject({ name: "Checkout", teams: ["ENG"] });
+    expect(request.mock.calls[1][1]).toEqual({ input: { name: "Checkout", teamIds: ["team"] } });
+  });
+
+  it.each([
+    [{ teams: ["WEB"] }, [context], "Linear team WEB not found"],
+    [
+      { status: "Shipped" },
+      [context, { projectStatuses: { nodes: [] } }],
+      "Linear project status Shipped not found",
+    ],
+    [
+      {},
+      [context, { projectCreate: { success: false, project: null } }],
+      "Linear rejected the project creation",
+    ],
+  ])("fails to create a project that does not resolve: %j", async (fields, responses, error) => {
+    const { linear } = service(...responses);
+    await expect(linear.createProject({ name: "P", teams: ["ENG"], ...fields })).rejects.toThrow(
+      error
+    );
+  });
+
+  it("lists every page of projects, filtered by team", async () => {
+    const page = (nodes: unknown[], endCursor: string | null) => ({
+      projects: { nodes, pageInfo: { hasNextPage: endCursor !== null, endCursor } },
+    });
+    const { linear, request } = service(
+      context,
+      page([projectNode], "c1"),
+      page([{ ...projectNode, id: "p2", status: null, lead: { name: "Ana" } }], null)
+    );
+    const projects = await linear.listProjects("ENG");
+    expect(projects.map((project) => [project.id, project.status, project.lead])).toEqual([
+      ["project", { name: "Planned", type: "planned" }, null],
+      ["p2", null, { name: "Ana" }],
+    ]);
+    expect(projects[0]).not.toHaveProperty("content");
+    const filter = { accessibleTeams: { some: { id: { eq: "team" } } } };
+    expect(request.mock.calls[1][1]).toEqual({ filter, after: null });
+    expect(request.mock.calls[2][1]).toEqual({ filter, after: "c1" });
+  });
+
+  it("lists projects of every team without a team", async () => {
+    const { linear, request } = service({
+      projects: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+    });
+    await expect(linear.listProjects()).resolves.toEqual([]);
+    expect(request.mock.calls[0][1]).toEqual({ filter: undefined, after: null });
+  });
+
+  it("gets a project by reference or says it is missing", async () => {
+    const found = service({ projects: { nodes: [projectNode] } });
+    await expect(found.linear.getProject("checkout")).resolves.toMatchObject({
+      name: "Checkout",
+      description: "Summary",
+      content: null,
+    });
+    const missing = service({ projects: { nodes: [] } });
+    await expect(missing.linear.getProject("nope")).rejects.toThrow(
+      "Linear project nope not found"
+    );
+  });
+});
+
+describe("projectFilter", () => {
+  it.each([
+    [
+      "8a7f3c2e-1b4d-4e6f-9a0b-1c2d3e4f5a6b",
+      { id: { eq: "8a7f3c2e-1b4d-4e6f-9a0b-1c2d3e4f5a6b" } },
+    ],
+    ["https://linear.app/x/project/checkout-v2-abc123/issues", { slugId: { eq: "abc123" } }],
+    [
+      " Checkout ",
+      { or: [{ name: { eqIgnoreCase: "Checkout" } }, { slugId: { eq: "Checkout" } }] },
+    ],
+  ])("finds %s", (ref, filter) => {
+    expect(projectFilter(ref)).toEqual(filter);
   });
 });

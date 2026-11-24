@@ -680,3 +680,164 @@ describe("engine-only operations", () => {
     });
   });
 });
+
+describe("Linear commands", () => {
+  const created = {
+    id: "i",
+    identifier: "ENG-7",
+    title: "Fix login",
+    url: "https://linear.app/x/issue/ENG-7",
+    branchName: "me/eng-7-fix-login",
+    project: null,
+    state: { name: "Todo", type: "unstarted" },
+  };
+
+  it("create issues with the validated input and the workspace credential", async () => {
+    const create = vi.spyOn(LinearService.prototype, "createNamedIssue").mockResolvedValue(created);
+    const input = {
+      team: " ENG ",
+      title: "Fix login",
+      description: "  Steps\n",
+      project: "Checkout",
+      milestone: "Beta",
+      assignee: null,
+      labels: ["Bug", "Bug"],
+      priority: 0,
+      state: "Todo",
+    };
+    expect(await call("linear.issue-create", { workspaceId: "w1", input })).toEqual({
+      ok: true,
+      data: created,
+      warnings: [],
+    });
+    expect(create).toHaveBeenCalledWith({
+      team: "ENG",
+      title: "Fix login",
+      description: "  Steps\n",
+      project: "Checkout",
+      milestone: "Beta",
+      assignee: null,
+      labels: ["Bug"],
+      priority: 0,
+      state: "Todo",
+    });
+    await call("linear.issue-create", {
+      workspaceId: "w1",
+      input: { team: "ENG", title: "T", description: " " },
+    });
+    expect(create).toHaveBeenLastCalledWith({ team: "ENG", title: "T", description: undefined });
+    expect(JSON.stringify(create.mock.calls)).not.toContain("secret");
+    create.mockRestore();
+  });
+
+  it.each([
+    [{ title: "T" }],
+    [{ team: "ENG", title: " " }],
+    [{ team: "ENG", title: "T", priority: 5 }],
+    [{ team: "ENG", title: "T", priority: "high" }],
+    [{ team: "ENG", title: "T", labels: "Bug" }],
+    [{ team: "ENG", title: "T", labels: [""] }],
+    [{ team: "ENG", title: "T", description: 1 }],
+    [{ team: "ENG", title: "T", milestone: "Beta" }],
+    [{ team: "ENG", title: "T", assignee: "" }],
+    [{ team: "ENG", title: "T", parent: "ENG-1" }],
+  ])("reject invalid issue input before calling Linear: %j", async (input) => {
+    const create = vi.spyOn(LinearService.prototype, "createNamedIssue");
+    expect(await call("linear.issue-create", { workspaceId: "w1", input })).toMatchObject({
+      ok: false,
+      error: { code: "invalid_params" },
+    });
+    expect(create).not.toHaveBeenCalled();
+    create.mockRestore();
+  });
+
+  it("create projects with the validated input", async () => {
+    const create = vi
+      .spyOn(LinearService.prototype, "createProject")
+      .mockResolvedValue({ id: "p" } as never);
+    const input = {
+      name: " Checkout v2 ",
+      teams: ["ENG", "WEB"],
+      content: "# Goals",
+      lead: "me",
+      status: "Planned",
+      targetDate: "2026-12-31",
+    };
+    expect(await call("linear.project-create", { workspaceId: "w1", input })).toMatchObject({
+      ok: true,
+      data: { id: "p" },
+    });
+    expect(create).toHaveBeenCalledWith({ ...input, name: "Checkout v2" });
+    create.mockRestore();
+  });
+
+  it.each([
+    [{ teams: ["ENG"] }],
+    [{ name: "P", teams: [] }],
+    [{ name: "P", teams: "ENG" }],
+    [{ name: "P", teams: ["ENG"], targetDate: "31/12/2026" }],
+    [{ name: "P", teams: ["ENG"], startDate: 20261231 }],
+    [{ name: "P", teams: ["ENG"], status: " " }],
+    [{ name: "P", teams: ["ENG"], memberIds: ["u"] }],
+  ])("reject invalid project input before calling Linear: %j", async (input) => {
+    const create = vi.spyOn(LinearService.prototype, "createProject");
+    expect(await call("linear.project-create", { workspaceId: "w1", input })).toMatchObject({
+      ok: false,
+      error: { code: "invalid_params" },
+    });
+    expect(create).not.toHaveBeenCalled();
+    create.mockRestore();
+  });
+
+  it("read teams and projects", async () => {
+    const teams = vi
+      .spyOn(LinearService.prototype, "listTeams")
+      .mockResolvedValue([{ id: "t", key: "ENG", name: "Engineering" }]);
+    const projects = vi.spyOn(LinearService.prototype, "listProjects").mockResolvedValue([]);
+    const project = vi
+      .spyOn(LinearService.prototype, "getProject")
+      .mockResolvedValue({ id: "p" } as never);
+    expect(await call("linear.teams", { workspaceId: "w1" })).toMatchObject({
+      ok: true,
+      data: [{ key: "ENG" }],
+    });
+    await call("linear.projects", { workspaceId: "w1" });
+    expect(projects).toHaveBeenLastCalledWith(undefined);
+    await call("linear.projects", { workspaceId: "w1", team: " ENG " });
+    expect(projects).toHaveBeenLastCalledWith("ENG");
+    expect(
+      await call("linear.project-get", { workspaceId: "w1", project: "Checkout" })
+    ).toMatchObject({ ok: true, data: { id: "p" } });
+    expect(project).toHaveBeenCalledWith("Checkout");
+    for (const spy of [teams, projects, project]) spy.mockRestore();
+  });
+
+  it("report Linear failures with Linear's message", async () => {
+    const projects = vi
+      .spyOn(LinearService.prototype, "listProjects")
+      .mockRejectedValue(new Error("Linear team WEB not found"));
+    expect(await call("linear.projects", { workspaceId: "w1", team: "WEB" })).toEqual({
+      ok: false,
+      error: { code: "linear_failed", message: "Linear team WEB not found" },
+    });
+    projects.mockRestore();
+  });
+
+  it("need a known workspace with Linear configured", async () => {
+    expect(await call("linear.teams", {})).toMatchObject({
+      ok: false,
+      error: { code: "invalid_params" },
+    });
+    expect(await call("linear.teams", { workspaceId: "missing" })).toMatchObject({
+      ok: false,
+      error: { code: "not_found" },
+    });
+    state.workspaces[0].linearApiKey = undefined;
+    expect(
+      await call("linear.issue-create", {
+        workspaceId: "w1",
+        input: { team: "ENG", title: "T" },
+      })
+    ).toMatchObject({ ok: false, error: { code: "linear_not_configured" } });
+  });
+});
